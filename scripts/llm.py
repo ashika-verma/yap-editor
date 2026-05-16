@@ -71,7 +71,7 @@ def _openai_compat(
     schema: dict | None = None,
     model: str | None = None,
 ) -> str:
-    import urllib.request
+    import urllib.request, urllib.error
 
     base_url = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:1234").rstrip("/")
     effective_model = (
@@ -81,9 +81,14 @@ def _openai_compat(
     )
     api_key = os.environ.get("LLM_API_KEY", "lm-studio")
 
-    # Build messages — if a schema is requested, embed it in the system prompt
-    # because local models vary in structured-output support.
-    system = "You are a helpful assistant. Respond ONLY with valid JSON — no markdown, no explanation."
+    # Build messages. "Think carefully" in system prompt triggers reasoning_content
+    # on models that support it (e.g. Gemma 4B via LM Studio). The thinking goes
+    # to reasoning_content, so content is already clean JSON — no stripping needed.
+    system = (
+        "You are a helpful assistant and expert video editor. "
+        "Think carefully before responding. "
+        "Respond ONLY with valid JSON — no markdown, no explanation outside the JSON."
+    )
     if schema:
         system += f"\n\nYour response must match this JSON schema exactly:\n{json.dumps(schema, indent=2)}"
 
@@ -115,10 +120,27 @@ def _openai_compat(
             "Authorization": f"Bearer {api_key}",
         },
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} from {base_url}: {body[:400]}") from e
 
-    return data["choices"][0]["message"]["content"]
+    msg     = data["choices"][0]["message"]
+    content = msg.get("content") or ""
+
+    # Log thinking tokens when present (goes to stderr so it doesn't pollute stdout JSON)
+    reasoning = msg.get("reasoning_content", "")
+    if reasoning and os.environ.get("LLM_DEBUG"):
+        import sys
+        print(f"[llm thinking] {reasoning[:300]}{'...' if len(reasoning) > 300 else ''}", file=sys.stderr)
+
+    # Fallback: strip <think>...</think> if a model puts thinking in content instead
+    if "<think>" in content:
+        content = content.split("</think>", 1)[-1].strip()
+
+    return content
 
 
 def _detect_model(base_url: str) -> str:

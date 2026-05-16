@@ -370,7 +370,7 @@ def run_narrative_architect(
     n_segs    = len(segments)
     min_drops = max(1, int(cut_pct * n_segs))
 
-    if not api_key:
+    if not api_key and not _llm.is_local():
         print("  No GEMINI_API_KEY — rule-based fallback", file=sys.stderr)
         return _rule_based_fallback(segments)
 
@@ -474,16 +474,23 @@ Transcript ({n_segs} segments):
 {transcript_text}"""
 
         # Use Pro for deeper reasoning on structural analysis; fallback to Flash.
-        # When running locally (LLM_BASE_URL set), skip the Pro attempt entirely.
+        # In local mode: pass model=None so _detect_model auto-selects the loaded model,
+        # and pass schema to force json_schema mode (thinking models put output in
+        # reasoning_content when using text mode, leaving content empty).
         raw = None
-        candidates = ["gemini-2.5-flash"] if _llm.is_local() else ["gemini-2.5-pro", "gemini-2.5-flash"]
+        pass1_schema = ANALYSIS_SCHEMA if _llm.is_local() else None
+        if _llm.is_local():
+            candidates = [None]  # auto-detect from LM Studio
+        else:
+            candidates = ["gemini-2.5-pro", "gemini-2.5-flash"]
         for model_name in candidates:
             try:
-                raw = _gemini_generate(api_key, analysis_prompt, schema=None, model=model_name)
-                print(f"  Pass 1 using {model_name}", file=sys.stderr)
+                raw = _gemini_generate(api_key, analysis_prompt, schema=pass1_schema, model=model_name)
+                label = model_name or os.environ.get("LLM_MODEL", "local")
+                print(f"  Pass 1 using {label}", file=sys.stderr)
                 break
             except Exception as me:
-                print(f"  {model_name} unavailable ({me}), trying next", file=sys.stderr)
+                print(f"  {model_name or 'local'} unavailable ({me}), trying next", file=sys.stderr)
         if raw is None:
             raise RuntimeError("All models failed for Pass 1")
         try:
@@ -608,10 +615,42 @@ Segments to decide — each shown with its nearest kept neighbours for join-qual
 {join_text}"""
 
     try:
-        text   = _gemini_generate(api_key, decision_prompt, schema=NARRATIVE_SCHEMA)
-        result = _parse_json(text)
+        # Local models (small context / weaker reasoning) process in batches
+        # of 15 segments so the task stays within the model's capability.
+        BATCH = 15 if _llm.is_local() else len(undecided)
+        p2: dict[int, dict] = {}
+        summary_text = ""
 
-        p2 = {s["index"]: s for s in result.get("segments", [])}
+        for batch_start in range(0, len(undecided), BATCH):
+            batch = undecided[batch_start: batch_start + BATCH]
+            batch_join = "\n\n".join(join_lines[batch_start: batch_start + BATCH])
+            batch_remaining = max(0, remaining_min - len(p2) - sum(1 for k, v in p2.items() if not v.get("keep")))
+
+            batch_prompt = decision_prompt.replace(
+                f"Now decide the {len(undecided)} REMAINING segments.",
+                f"Now decide the {len(batch)} segments in this batch ({batch_start+1}–{batch_start+len(batch)} of {len(undecided)})."
+            ).replace(join_text, batch_join)
+            # Adjust target for this batch
+            batch_prompt = batch_prompt.replace(
+                f"drop roughly {remaining_min} of these {len(undecided)} remaining segments",
+                f"drop roughly {batch_remaining} of these {len(batch)} segments in this batch"
+            )
+
+            batch_schema = dict(NARRATIVE_SCHEMA)
+            if batch_start + BATCH < len(undecided):
+                # Intermediate batch: summary not needed yet
+                batch_schema = {k: v for k, v in NARRATIVE_SCHEMA.items() if k != "required"}
+                batch_schema["required"] = ["segments"]
+
+            batch_text = _gemini_generate(api_key, batch_prompt, schema=batch_schema)
+            batch_result = _parse_json(batch_text)
+
+            for s in batch_result.get("segments", []):
+                p2[s["index"]] = s
+            if batch_result.get("summary"):
+                summary_text = batch_result["summary"]
+
+        result = {"segments": list(p2.values()), "summary": summary_text}
 
         # Merge: pre-cuts take priority, then Pass 2, then default keep
         final_segs = []
@@ -818,7 +857,7 @@ def main() -> None:
 
         # ── 2. Director ────────────────────────────────────────────────────────
         print("▶ Director: configuring pipeline...", file=sys.stderr)
-        if api_key:
+        if api_key or _llm.is_local():
             director_cfg = run_director(api_key, analyze_result, whisper_result, duration)
         else:
             director_cfg = dict(_DIRECTOR_DEFAULTS)
@@ -830,11 +869,7 @@ def main() -> None:
 
         # ── 3. Narrative Architect ─────────────────────────────────────────────
         print("▶ Narrative Architect: keep/drop decisions...", file=sys.stderr)
-        if api_key:
-            narrative_result = run_narrative_architect(api_key, whisper_result, analyze_result, director_cfg)
-        else:
-            # Fallback without API key
-            narrative_result = run_narrative_architect("", whisper_result, analyze_result, director_cfg)
+        narrative_result = run_narrative_architect(api_key, whisper_result, analyze_result, director_cfg)
 
         segments = build_segments(whisper_result, narrative_result, analyze_result)
         segments = _repair_broken_joins(segments)

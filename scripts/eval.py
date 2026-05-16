@@ -151,13 +151,16 @@ def save_results(results: list[dict], model: str) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import llm as _llm
+
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        print("GEMINI_API_KEY not set", file=sys.stderr)
+    if not api_key and not _llm.is_local():
+        print("GEMINI_API_KEY not set (or set LLM_BASE_URL for a local backend)", file=sys.stderr)
         sys.exit(1)
 
     args    = sys.argv[1:]
-    model   = "gemini-2.5-flash"
+    model   = None  # use llm.py default for the active backend
     targets = []
 
     i = 0
@@ -178,10 +181,12 @@ def main() -> None:
         print("  python scripts/orchestrator.py video.mp4 --save-fixture")
         sys.exit(0)
 
-    print(f"Evaluating {len(fixtures)} fixture(s) with {model}...")
+    backend = os.environ.get("LLM_BASE_URL", "gemini")
+    label   = model or os.environ.get("LLM_MODEL", backend)
+    print(f"Evaluating {len(fixtures)} fixture(s) with {label}...")
     results = run_eval(fixtures, api_key, model)
     print_summary(results)
-    save_results(results, model)
+    save_results(results, label)
 
 
 if __name__ == "__main__":

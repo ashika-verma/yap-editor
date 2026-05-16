@@ -159,6 +159,10 @@ export LLM_MODEL=google/gemma-4-e4b          # model loaded in LM Studio
 `scripts/llm.py` handles routing. `LLM_BASE_URL` takes priority over `GEMINI_API_KEY`.
 Uses `response_format: json_schema` for structured outputs (supported by LM Studio ≥ 0.3).
 
+**Context window**: The Pass 1 analysis prompt is ~4000–5000 tokens. In LM Studio, load the model with at least **8192 context** (Settings → Context Length). With the default 4096, Pass 1 will fail with a 400 error and fall back to Pass 2 only.
+
+**Thinking mode**: Gemma 4B automatically emits thinking in `reasoning_content` when prompted to "think carefully." The pipeline captures this automatically; set `LLM_DEBUG=1` to see thinking excerpts on stderr.
+
 ## Ignored by git
 
 `.venv/`, `fixtures/`, `eval_results/`, `videos/`, `tmp/`, `.env*`
