@@ -10,7 +10,8 @@ import re
 
 MAX_BRIDGE_SEC = 7.5
 MAX_BRIDGE_SEGMENTS = 2
-MAX_RESTORED_SEC = 4.0
+MAX_RESTORED_SEC = 4.0       # for pair-bridge restoration
+MAX_DIRECT_BRIDGE_SEC = 20.0 # for segments directly between two kept neighbours
 MIN_WORD_CUT_MARGIN = 0.06
 
 SOFT_DROP_REASONS = {
@@ -124,13 +125,14 @@ def _ends_openly(segment: dict) -> bool:
     return text[-1] not in ".?!" or _last_word(segment) in OPEN_ENDINGS
 
 
-def _is_restorable_bridge(segment: dict) -> bool:
+def _is_restorable_bridge(segment: dict, direct: bool = False) -> bool:
     if segment.get("decisionSource") == "user":
         return False
     reason = segment.get("dropReason", "")
     if reason not in SOFT_DROP_REASONS:
         return False
-    return _duration(segment) <= MAX_RESTORED_SEC
+    limit = MAX_DIRECT_BRIDGE_SEC if direct else MAX_RESTORED_SEC
+    return _duration(segment) <= limit
 
 
 def _restore(segment: dict, reason: str, repairs: list[dict], segment_index: int) -> None:
@@ -244,6 +246,7 @@ def apply_continuity_guard(segments: list[dict]) -> tuple[list[dict], list[dict]
             continue
 
         if _starts_dependently(segment) or _ends_openly(segment):
-            _restore(segment, "dropped segment carries connective tissue", repairs, segment_index)
+            if _is_restorable_bridge(segment, direct=True):
+                _restore(segment, "dropped segment carries connective tissue", repairs, segment_index)
 
     return result, repairs
