@@ -85,13 +85,18 @@ AI summary of the edit: "{summary}"
 
 Score each dimension 0–100 using these anchors:
 
-  90–100  Excellent — near-seamless; a viewer wouldn't notice the cuts
-  75–89   Good — a few noticeable but non-distracting joins
-  60–74   Acceptable — several joins are slightly abrupt but meaning survives
-  40–59   Mixed — multiple transitions that briefly confuse the viewer
-  20–39   Poor — many broken joins or missing context
+  90–100  Excellent — the narrative flows well and the viewer stays oriented
+          throughout; cuts are detectable but non-disruptive; no lost context
+  75–89   Good — 2–3 moments where the viewer briefly loses the thread or
+          context feels missing, but recovers quickly
+  60–74   Acceptable — several transitions cause real confusion; viewer has
+          to work to stay oriented
+  40–59   Mixed — multiple broken joins; viewer loses context repeatedly
+  20–39   Poor — many broken joins; meaning frequently unclear
   0–19    Very poor — incoherent; viewer is lost throughout
 
+An edit that removes clear tangents and filler while preserving the main
+narrative, with at most minor roughness at a few joins, should score 90+.
 Use the full range. Fine-grained scores (e.g. 72, 88, 95) are expected and preferred.
 
 COHERENCE — Does the edited transcript flow naturally as a continuous narrative?

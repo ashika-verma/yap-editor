@@ -769,8 +769,7 @@ def _rule_based_fallback(segments: list[dict]) -> dict:
     }
 
 
-# Words that, at the START of the first kept segment, signal a dangling reference
-# to cut context — the viewer would be lost without what came before.
+# Words that signal a dangling reference to cut context at a segment boundary.
 _DANGLING_OPENERS = {
     "because", "which", "that", "so", "and", "but", "or",
     "although", "though", "since", "as", "if", "when", "where",
@@ -778,28 +777,43 @@ _DANGLING_OPENERS = {
     "however", "therefore", "thus", "hence", "nevertheless",
 }
 
-# Reasons safe to override for any dangling-opener repair
+# Words that signal the speaker is restarting the previous thought mid-stream.
+_RESTART_MARKERS = {
+    "basically", "i mean", "what i mean", "actually", "so anyway",
+    "okay so", "right so", "well", "anyway", "alright", "look",
+    "so basically", "i guess", "like i said", "in other words",
+}
+
+# Words that, at end of a segment, indicate an incomplete sentence.
+_INCOMPLETE_ENDERS = {
+    "and", "or", "but", "so", "the", "a", "an", "to", "for", "of",
+    "in", "at", "with", "that", "which", "then", "go", "into",
+    "is", "was", "were", "are",
+}
+
+# Reasons safe to override for any dangling-opener / bridge repair.
 _OPENER_RESTORABLE_REASONS = {"ramble", "false_start", "filler", "consecutive_duplicate", ""}
-# For segment 0 specifically, also restore "repetition"/"superseded" — the opener must frame
-# the video regardless of how Pass 2 classified it. Only hard structural cuts (tangent,
-# circular, irrelevant) stay cut at position 0.
+# For segment 0 specifically, also restore "repetition"/"superseded".
 _OPENER_RESTORABLE_REASONS_SEG0 = _OPENER_RESTORABLE_REASONS | {"repetition", "superseded"}
 
 
 def _protect_opener(final_segs: list[dict], n_segs: int, whisper_segs: list[dict]) -> list[dict]:
     """
-    Two deterministic coherence fixes for the start of the edited video:
+    Four deterministic coherence passes applied after Pass 2.
 
-    1. Opener protection: if segment 0 was dropped for a soft reason (ramble/filler/
-       false_start) but has real content (≥5 words), restore it — the opener is
-       always needed to frame what follows.
+    1. Opener protection — restore segment [0] if dropped for a soft reason.
+    2. Dangling-opener repair — restore one bridge before the first kept segment
+       when it starts with a subordinating connector.
+    3. Mid-video dangling join repair — same bridge logic for every subsequent
+       transition where a kept segment starts with a connector word.
+    4. Fragment cleanup — drop any kept segment that is ≤ 2 words (stutter/
+       duplicate that slipped through), and drop the final kept segment if it
+       is < 6 words and appears to be a trailing fragment.
+    5. Adjacent restart dedup — when two consecutive kept segments overlap ≥ 30%
+       in vocabulary AND the second starts with a restart marker, drop the
+       incomplete first segment (the speaker restarted mid-thought).
 
-    2. Dangling-opener repair: if the first kept segment begins with a subordinating
-       word ("because", "which", "so", …), the viewer is dropped mid-sentence.
-       Restore the nearest preceding dropped segment that provides the antecedent.
-
-    `whisper_segs` provides the source text for each segment (final_segs has no text
-    field at this stage — text is added later by build_segments).
+    `whisper_segs` provides the source text; final_segs has no text at this stage.
     """
     if not final_segs:
         return final_segs
@@ -808,7 +822,7 @@ def _protect_opener(final_segs: list[dict], n_segs: int, whisper_segs: list[dict
         text = whisper_segs[idx]["text"] if idx < len(whisper_segs) else ""
         return text.strip().split()
 
-    # 1. Opener protection
+    # ── 1. Opener protection ─────────────────────────────────────────────────
     seg0 = final_segs[0]
     if not seg0.get("keep") and seg0.get("dropReason", "") in _OPENER_RESTORABLE_REASONS_SEG0:
         if len(_seg_words(0)) >= 5:
@@ -816,7 +830,7 @@ def _protect_opener(final_segs: list[dict], n_segs: int, whisper_segs: list[dict
             final_segs[0]["dropReason"] = ""
             print(f"  Opener protection: restored segment [0] (was: {seg0.get('dropReason','?')})", file=sys.stderr)
 
-    # 2. Dangling-opener repair
+    # ── 2. Dangling-opener repair (first kept segment only) ──────────────────
     first_kept_idx = next((i for i, s in enumerate(final_segs) if s.get("keep")), None)
     if first_kept_idx is not None and first_kept_idx > 0:
         first_line_words = _seg_words(first_kept_idx)
@@ -831,10 +845,100 @@ def _protect_opener(final_segs: list[dict], n_segs: int, whisper_segs: list[dict
                     final_segs[j]["dropReason"] = ""
                     print(
                         f"  Dangling opener repair: restored [{j}] before "
-                        f"first-kept [{first_kept_idx}] which starts with '{first_word}'",
+                        f"first-kept [{first_kept_idx}] (starts '{first_word}')",
                         file=sys.stderr,
                     )
                     break
+
+    # ── 3. Mid-video dangling join repair ────────────────────────────────────
+    # For every kept segment (not just the first) that starts with a connector
+    # word and is preceded by dropped segments, restore the nearest dropped
+    # segment with a soft reason to provide the antecedent.
+    for i in range(1, len(final_segs)):
+        if not final_segs[i].get("keep"):
+            continue
+        if final_segs[i - 1].get("keep"):
+            continue  # no gap — no repair needed
+        curr_words = _seg_words(i)
+        if not curr_words:
+            continue
+        fw = curr_words[0].rstrip(".,!?;").lower()
+        if fw not in _DANGLING_OPENERS:
+            continue
+        for j in range(i - 1, -1, -1):
+            cand = final_segs[j]
+            if cand.get("keep"):
+                break
+            if (cand.get("dropReason", "") in _OPENER_RESTORABLE_REASONS
+                    and len(_seg_words(j)) >= 4):
+                cand["keep"] = True
+                cand["dropReason"] = ""
+                print(
+                    f"  Mid-video dangling repair: restored [{j}] before [{i}] (starts '{fw}')",
+                    file=sys.stderr,
+                )
+                break
+
+    # ── 4. Fragment cleanup ──────────────────────────────────────────────────
+    # Drop kept segments that are very short (stutter fragments or lone words).
+    n_kept = sum(1 for s in final_segs if s.get("keep"))
+    for i, s in enumerate(final_segs):
+        if not s.get("keep"):
+            continue
+        words = _seg_words(i)
+        if len(words) <= 2 and n_kept > 1:
+            s["keep"] = False
+            s["dropReason"] = "fragment"
+            n_kept -= 1
+            print(f"  Fragment cleanup: dropped [{i}] {words!r}", file=sys.stderr)
+
+    # Drop the trailing kept segment if it is a short fragment (< 6 words).
+    kept_indices = [i for i, s in enumerate(final_segs) if s.get("keep")]
+    if kept_indices:
+        last_i = kept_indices[-1]
+        last_words = _seg_words(last_i)
+        if len(last_words) < 6 and len(kept_indices) > 1:
+            final_segs[last_i]["keep"] = False
+            final_segs[last_i]["dropReason"] = "fragment"
+            print(f"  Trailing fragment cleanup: dropped [{last_i}] {last_words!r}", file=sys.stderr)
+
+    # ── 5. Adjacent restart dedup ────────────────────────────────────────────
+    # When two consecutive kept segments share ≥ 30% vocabulary AND the second
+    # starts with a restart marker, the speaker restarted mid-thought. Drop the
+    # incomplete first segment.
+    kept_positions = [i for i, s in enumerate(final_segs) if s.get("keep")]
+    for pos in range(1, len(kept_positions)):
+        prev_i = kept_positions[pos - 1]
+        curr_i = kept_positions[pos]
+        if curr_i != prev_i + 1:
+            continue  # non-adjacent — skip
+        prev_words = _seg_words(prev_i)
+        curr_words = _seg_words(curr_i)
+        if not prev_words or not curr_words:
+            continue
+        curr_text_lower = " ".join(curr_words).lower()
+        is_restart = any(curr_text_lower.startswith(m) for m in _RESTART_MARKERS)
+        if not is_restart:
+            continue
+        prev_set = {w.lower() for w in prev_words}
+        curr_set = {w.lower() for w in curr_words}
+        overlap = len(prev_set & curr_set) / max(len(prev_set | curr_set), 1)
+        if overlap >= 0.30:
+            last_prev_word = prev_words[-1].lower().rstrip(".,!?;")
+            if last_prev_word in _INCOMPLETE_ENDERS:
+                final_segs[prev_i]["keep"] = False
+                final_segs[prev_i]["dropReason"] = "false_start"
+                print(
+                    f"  Restart dedup: dropped incomplete [{prev_i}], kept restart [{curr_i}]",
+                    file=sys.stderr,
+                )
+            else:
+                final_segs[curr_i]["keep"] = False
+                final_segs[curr_i]["dropReason"] = "false_start"
+                print(
+                    f"  Restart dedup: dropped restart [{curr_i}], kept complete [{prev_i}]",
+                    file=sys.stderr,
+                )
 
     return final_segs
 
