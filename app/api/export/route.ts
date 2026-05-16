@@ -44,13 +44,13 @@ interface Segment {
   zoomHint?: ZoomHint | null;
 }
 
-const WORD_CUT_PAD_PRE  = 0.003; // tiny pre-cut margin — the preceding word has already ended
-const WORD_CUT_PAD_POST = 0.018; // post-cut margin — clears reverb tail of removed word
-const MIN_SPAN      = 0.15;
+const WORD_CUT_PAD_PRE  = 0.003; // pre-cut margin before renderStartSec
+const WORD_CUT_PAD_POST = 0.030; // post-cut margin after renderEndSec
+const MIN_SPAN      = 0.05;  // lowered from 0.15 — short spans near word cuts must survive
 const PRE_ROLL      = 0.08;
 const POST_ROLL     = 0.25;
 const AUDIO_FADE    = 0.025; // fade at segment group edges
-const AUDIO_FADE_INNER = 0.004; // fade at word-cut seams (click prevention only)
+const AUDIO_FADE_INNER = 0.025; // audible crossfade at word-cut seams (was 4 ms click-only)
 
 function computeKeepSpans(
   rangeStart: number,
@@ -61,8 +61,11 @@ function computeKeepSpans(
 
   const zones = wordCuts
     .map((wc) => ({
-      s: Math.max((wc.renderStartSec ?? wc.startSec) - WORD_CUT_PAD_PRE,  rangeStart),
-      e: Math.min((wc.renderEndSec ?? wc.endSec)   + WORD_CUT_PAD_POST, rangeEnd),
+      // Cap with surgeon's acoustic boundaries so the cut zone never starts before
+      // the preceding word's acoustic end (wc.startSec) or ends after the following
+      // word's acoustic onset (wc.endSec), preventing adjacent speech from being clipped.
+      s: Math.max((wc.renderStartSec ?? wc.startSec) - WORD_CUT_PAD_PRE, wc.startSec, rangeStart),
+      e: Math.min((wc.renderEndSec ?? wc.endSec)   + WORD_CUT_PAD_POST, wc.endSec,   rangeEnd),
     }))
     .filter((z) => z.e > z.s)
     .sort((a, b) => a.s - b.s);

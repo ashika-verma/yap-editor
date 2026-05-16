@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_judge import judge_plan
+from eval_audio import score_fixture as score_audio_fixture
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 RESULTS_DIR  = Path(__file__).parent.parent / "eval_results"
@@ -81,6 +82,15 @@ def run_eval(fixtures: list[tuple[str, dict]], api_key: str, model: str) -> list
         print(f"   Conciseness  {_score_bar(con)} {con:>3}/100  {score['conciseness_reason']}")
         print(f"   Average: {avg}/100")
 
+        try:
+            ar = score_audio_fixture(path)
+            print(f"   Audio        {_score_bar(ar.post_fix_score)} {ar.post_fix_score:>3}/100  "
+                  f"wc={ar.total_word_cuts}  "
+                  f"pre-fix max clip={ar.pre_max_clip_ms:.0f}ms  "
+                  f"orphaned={ar.post_orphaned_ms:.0f}ms")
+        except Exception as e:
+            print(f"   Audio: scorer error — {e}")
+
         fps = score.get("false_positives", [])
         fns = score.get("false_negatives", [])
 
@@ -100,6 +110,12 @@ def run_eval(fixtures: list[tuple[str, dict]], api_key: str, model: str) -> list
         if notes:
             print(f"   Notes: {notes}")
 
+        try:
+            ar2 = score_audio_fixture(path)
+            audio_score = ar2.post_fix_score
+        except Exception:
+            audio_score = -1
+
         results.append({
             "fixture":         name,
             "cut_pct":         cut,
@@ -107,6 +123,7 @@ def run_eval(fixtures: list[tuple[str, dict]], api_key: str, model: str) -> list
             "preservation":    pre,
             "conciseness":     con,
             "avg":             avg,
+            "audio":           audio_score,
             "false_positives": fps,
             "false_negatives": fns,
             "overall_notes":   notes,
@@ -123,21 +140,26 @@ def print_summary(results: list[dict]) -> None:
     print("\n" + "═" * 66)
     print("SUMMARY")
     print("═" * 66)
-    print(f"{'Fixture':<32} {'Cut%':>5} {'Coh':>5} {'Pre':>5} {'Con':>5} {'Avg':>6}")
-    print("─" * 68)
+    print(f"{'Fixture':<32} {'Cut%':>5} {'Coh':>5} {'Pre':>5} {'Con':>5} {'Audio':>6} {'Avg':>6}")
+    print("─" * 76)
     for r in results:
+        audio_str = f"{r['audio']:>5}" if r.get("audio", -1) >= 0 else "   --"
         print(
             f"{r['fixture'][:31]:<32} {r['cut_pct']:>4}%"
-            f" {r['coherence']:>5} {r['preservation']:>5} {r['conciseness']:>5} {r['avg']:>6}"
+            f" {r['coherence']:>5} {r['preservation']:>5} {r['conciseness']:>5}"
+            f" {audio_str}  {r['avg']:>6}"
         )
-    print("─" * 68)
-    cohs = [r["coherence"]    for r in results]
-    pres = [r["preservation"] for r in results]
-    cons = [r["conciseness"]  for r in results]
-    cuts = [r["cut_pct"]      for r in results]
+    print("─" * 76)
+    cohs  = [r["coherence"]    for r in results]
+    pres  = [r["preservation"] for r in results]
+    cons  = [r["conciseness"]  for r in results]
+    cuts  = [r["cut_pct"]      for r in results]
+    auds  = [r["audio"] for r in results if r.get("audio", -1) >= 0]
+    audio_mean = f"{_avg(auds):>5}" if auds else "   --"
     print(
         f"{'MEAN':<32} {round(sum(cuts)/len(cuts)):>4}%"
-        f" {_avg(cohs):>5} {_avg(pres):>5} {_avg(cons):>5} {_avg(cohs+pres+cons):>6}"
+        f" {_avg(cohs):>5} {_avg(pres):>5} {_avg(cons):>5}"
+        f" {audio_mean}  {_avg(cohs+pres+cons):>6}"
     )
 
 
