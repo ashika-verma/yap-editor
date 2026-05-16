@@ -22,7 +22,8 @@ RESULTS_DIR  = Path(__file__).parent.parent / "eval_results"
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _score_bar(n: int) -> str:
-    return "█" * n + "░" * (5 - n)
+    filled = round(n / 10)
+    return "█" * filled + "░" * (10 - filled)
 
 def _avg(scores: list[int]) -> float:
     return round(sum(scores) / len(scores), 1) if scores else 0.0
@@ -75,10 +76,10 @@ def run_eval(fixtures: list[tuple[str, dict]], api_key: str, model: str) -> list
         con = score["conciseness"]
         avg = _avg([coh, pre, con])
 
-        print(f"   Coherence    {_score_bar(coh)} {coh}/5  {score['coherence_reason']}")
-        print(f"   Preservation {_score_bar(pre)} {pre}/5  {score['preservation_reason']}")
-        print(f"   Conciseness  {_score_bar(con)} {con}/5  {score['conciseness_reason']}")
-        print(f"   Average: {avg}/5")
+        print(f"   Coherence    {_score_bar(coh)} {coh:>3}/100  {score['coherence_reason']}")
+        print(f"   Preservation {_score_bar(pre)} {pre:>3}/100  {score['preservation_reason']}")
+        print(f"   Conciseness  {_score_bar(con)} {con:>3}/100  {score['conciseness_reason']}")
+        print(f"   Average: {avg}/100")
 
         fps = score.get("false_positives", [])
         fns = score.get("false_negatives", [])
@@ -122,21 +123,21 @@ def print_summary(results: list[dict]) -> None:
     print("\n" + "═" * 66)
     print("SUMMARY")
     print("═" * 66)
-    print(f"{'Fixture':<32} {'Cut%':>5} {'Coh':>5} {'Pre':>5} {'Con':>5} {'Avg':>5}")
-    print("─" * 66)
+    print(f"{'Fixture':<32} {'Cut%':>5} {'Coh':>5} {'Pre':>5} {'Con':>5} {'Avg':>6}")
+    print("─" * 68)
     for r in results:
         print(
             f"{r['fixture'][:31]:<32} {r['cut_pct']:>4}%"
-            f" {r['coherence']:>5} {r['preservation']:>5} {r['conciseness']:>5} {r['avg']:>5}"
+            f" {r['coherence']:>5} {r['preservation']:>5} {r['conciseness']:>5} {r['avg']:>6}"
         )
-    print("─" * 66)
+    print("─" * 68)
     cohs = [r["coherence"]    for r in results]
     pres = [r["preservation"] for r in results]
     cons = [r["conciseness"]  for r in results]
     cuts = [r["cut_pct"]      for r in results]
     print(
         f"{'MEAN':<32} {round(sum(cuts)/len(cuts)):>4}%"
-        f" {_avg(cohs):>5} {_avg(pres):>5} {_avg(cons):>5} {_avg(cohs+pres+cons):>5}"
+        f" {_avg(cohs):>5} {_avg(pres):>5} {_avg(cons):>5} {_avg(cohs+pres+cons):>6}"
     )
 
 

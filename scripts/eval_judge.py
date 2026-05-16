@@ -11,9 +11,9 @@ import json
 JUDGE_SCHEMA = {
     "type": "object",
     "properties": {
-        "coherence":            {"type": "integer"},
-        "preservation":         {"type": "integer"},
-        "conciseness":          {"type": "integer"},
+        "coherence":            {"type": "integer", "minimum": 0, "maximum": 100},
+        "preservation":         {"type": "integer", "minimum": 0, "maximum": 100},
+        "conciseness":          {"type": "integer", "minimum": 0, "maximum": 100},
         "coherence_reason":     {"type": "string"},
         "preservation_reason":  {"type": "string"},
         "conciseness_reason":   {"type": "string"},
@@ -83,7 +83,16 @@ AI summary of the edit: "{summary}"
 ═══ DROP DECISIONS ({n_cut} removed) ═══
 {chr(10).join(drop_lines)}
 
-Score each dimension 1–5 (1 = poor, 3 = acceptable, 5 = excellent):
+Score each dimension 0–100 using these anchors:
+
+  90–100  Excellent — near-seamless; a viewer wouldn't notice the cuts
+  75–89   Good — a few noticeable but non-distracting joins
+  60–74   Acceptable — several joins are slightly abrupt but meaning survives
+  40–59   Mixed — multiple transitions that briefly confuse the viewer
+  20–39   Poor — many broken joins or missing context
+  0–19    Very poor — incoherent; viewer is lost throughout
+
+Use the full range. Fine-grained scores (e.g. 72, 88, 95) are expected and preferred.
 
 COHERENCE — Does the edited transcript flow naturally as a continuous narrative?
   Watch for: abrupt jumps, missing context, broken sentences at joins, mid-thought cuts.
@@ -100,8 +109,8 @@ Also identify (max 3 each):
 - FALSE NEGATIVES: segments that were KEPT but should have been CUT
   (clear flab that survived — cite segment index, short quote, and why it adds nothing)
 
-Be critical. Reserve 4–5 for genuinely strong edits. Note in overall_notes any systemic
-patterns (e.g. "consistently cuts too early before a point lands" or "misses repetitions")."""
+Note in overall_notes any systemic patterns (e.g. "consistently cuts too early before a point
+lands" or "misses repetitions")."""
 
 
 def judge_plan(plan: dict, api_key: str, model: str = "gemini-2.5-flash") -> dict:

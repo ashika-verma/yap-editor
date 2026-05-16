@@ -279,6 +279,18 @@ ANALYSIS_SCHEMA = {
     "required": ["coreStory", "narrativeArc", "tangents", "repetitionGroups", "circularSections"],
 }
 
+QUOTA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "cuts": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "Indices of kept segments to cut, ordered most to least dispensable",
+        },
+    },
+    "required": ["cuts"],
+}
+
 NARRATIVE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -586,12 +598,28 @@ Already pre-cut (do NOT include these in your response):
         )
     join_text = "\n\n".join(join_lines)
 
+    # Local models (Gemma etc.) consistently under-cut with the default KEEP bias.
+    # The JOIN IF CUT preview already provides coherence protection, so for local mode
+    # we flip to a CUT bias and rely on the downstream coherence repair pass as backstop.
+    if _llm.is_local():
+        quota_guidance = (
+            f"Target: drop at least {remaining_min} of these {len(undecided)} remaining segments. "
+            "Bias toward cutting. "
+            "The JOIN IF CUT preview is your coherence guard — if the joined sentence reads naturally, CUT. "
+            "The downstream coherence repair pass auto-restores any grammatically broken joins."
+        )
+    else:
+        quota_guidance = (
+            f"Target: drop roughly {remaining_min} of these {len(undecided)} remaining segments. "
+            "When in doubt, KEEP — a kept segment can always be removed later; "
+            "a cut that breaks coherence is hard to undo."
+        )
+
     decision_prompt = f"""You are a video editor balancing conciseness with coherence.
 Structural tangents and repetitions have already been cut. Now decide the {len(undecided)} REMAINING segments.
 
 {context_block}
-Target: drop roughly {remaining_min} of these {len(undecided)} remaining segments.
-When in doubt, KEEP — a kept segment can always be removed later; a cut that breaks coherence is hard to undo.
+{quota_guidance}
 
 COHERENCE IS THE HIGHEST PRIORITY. Each segment below shows a "JOIN IF CUT" preview —
 the last 10 words of the previous kept segment followed by the first 10 words of the next
@@ -630,11 +658,17 @@ Segments to decide — each shown with its nearest kept neighbours for join-qual
                 f"Now decide the {len(undecided)} REMAINING segments.",
                 f"Now decide the {len(batch)} segments in this batch ({batch_start+1}–{batch_start+len(batch)} of {len(undecided)})."
             ).replace(join_text, batch_join)
-            # Adjust target for this batch
-            batch_prompt = batch_prompt.replace(
-                f"drop roughly {remaining_min} of these {len(undecided)} remaining segments",
-                f"drop roughly {batch_remaining} of these {len(batch)} segments in this batch"
-            )
+            # Adjust target for this batch (text differs between local and non-local prompts)
+            if _llm.is_local():
+                batch_prompt = batch_prompt.replace(
+                    f"drop at least {remaining_min} of these {len(undecided)} remaining segments",
+                    f"drop at least {batch_remaining} of these {len(batch)} segments in this batch",
+                )
+            else:
+                batch_prompt = batch_prompt.replace(
+                    f"drop roughly {remaining_min} of these {len(undecided)} remaining segments",
+                    f"drop roughly {batch_remaining} of these {len(batch)} segments in this batch",
+                )
 
             batch_schema = dict(NARRATIVE_SCHEMA)
             if batch_start + BATCH < len(undecided):
@@ -667,6 +701,26 @@ Segments to decide — each shown with its nearest kept neighbours for join-qual
             f"  Pass 2 OK — {total_drops}/{n_segs} total dropped ({total_drops/max(n_segs,1)*100:.0f}%)",
             file=sys.stderr,
         )
+
+        # ── Quota enforcement: prune weakest kept segs if cut rate still lags target
+        # Runs BEFORE opener protection so the LLM never sees the restored opener as a cut target.
+        QUOTA_GAP_THRESHOLD = 0.10  # trigger when actual cut% is > 10pp below target
+        actual_cut_pct = total_drops / max(n_segs, 1)
+        gap = cut_pct - actual_cut_pct
+        if gap >= QUOTA_GAP_THRESHOLD:
+            additional = max(1, int(gap * n_segs))
+            # Guard: never cut more than 15% of what's still kept (small nudge, not a hammer)
+            additional = min(additional, max(1, int(len([s for s in final_segs if s["keep"]]) * 0.15)))
+            print(
+                f"  Quota gap {gap:.0%} (target {cut_pct:.0%}, actual {actual_cut_pct:.0%})"
+                f" — enforcing {additional} more cut(s)",
+                file=sys.stderr,
+            )
+            final_segs = _run_quota_enforcement(api_key, final_segs, lines, additional)
+
+        # ── Opener protection + dangling-opener repair ───────────────────────────
+        # Runs AFTER quota enforcement — it's the final authority on the first segment.
+        final_segs = _protect_opener(final_segs, n_segs, segments)
 
         result["segments"]         = final_segs
         result["narrativeAnalysis"] = analysis
@@ -713,6 +767,123 @@ def _rule_based_fallback(segments: list[dict]) -> dict:
         "summary": f"Rule-based cut: {dropped}/{len(segments)} dropped. No Gemini API key — review and toggle manually.",
         "narrativeAnalysis": {},
     }
+
+
+# Words that, at the START of the first kept segment, signal a dangling reference
+# to cut context — the viewer would be lost without what came before.
+_DANGLING_OPENERS = {
+    "because", "which", "that", "so", "and", "but", "or",
+    "although", "though", "since", "as", "if", "when", "where",
+    "who", "whose", "whom", "whether", "while", "whereas",
+    "however", "therefore", "thus", "hence", "nevertheless",
+}
+
+# Reasons safe to override for any dangling-opener repair
+_OPENER_RESTORABLE_REASONS = {"ramble", "false_start", "filler", "consecutive_duplicate", ""}
+# For segment 0 specifically, also restore "repetition"/"superseded" — the opener must frame
+# the video regardless of how Pass 2 classified it. Only hard structural cuts (tangent,
+# circular, irrelevant) stay cut at position 0.
+_OPENER_RESTORABLE_REASONS_SEG0 = _OPENER_RESTORABLE_REASONS | {"repetition", "superseded"}
+
+
+def _protect_opener(final_segs: list[dict], n_segs: int, whisper_segs: list[dict]) -> list[dict]:
+    """
+    Two deterministic coherence fixes for the start of the edited video:
+
+    1. Opener protection: if segment 0 was dropped for a soft reason (ramble/filler/
+       false_start) but has real content (≥5 words), restore it — the opener is
+       always needed to frame what follows.
+
+    2. Dangling-opener repair: if the first kept segment begins with a subordinating
+       word ("because", "which", "so", …), the viewer is dropped mid-sentence.
+       Restore the nearest preceding dropped segment that provides the antecedent.
+
+    `whisper_segs` provides the source text for each segment (final_segs has no text
+    field at this stage — text is added later by build_segments).
+    """
+    if not final_segs:
+        return final_segs
+
+    def _seg_words(idx: int) -> list[str]:
+        text = whisper_segs[idx]["text"] if idx < len(whisper_segs) else ""
+        return text.strip().split()
+
+    # 1. Opener protection
+    seg0 = final_segs[0]
+    if not seg0.get("keep") and seg0.get("dropReason", "") in _OPENER_RESTORABLE_REASONS_SEG0:
+        if len(_seg_words(0)) >= 5:
+            final_segs[0]["keep"] = True
+            final_segs[0]["dropReason"] = ""
+            print(f"  Opener protection: restored segment [0] (was: {seg0.get('dropReason','?')})", file=sys.stderr)
+
+    # 2. Dangling-opener repair
+    first_kept_idx = next((i for i, s in enumerate(final_segs) if s.get("keep")), None)
+    if first_kept_idx is not None and first_kept_idx > 0:
+        first_line_words = _seg_words(first_kept_idx)
+        first_word = first_line_words[0].rstrip(".,!?;").lower() if first_line_words else ""
+        if first_word in _DANGLING_OPENERS:
+            for j in range(first_kept_idx - 1, -1, -1):
+                candidate = final_segs[j]
+                if (not candidate.get("keep")
+                        and candidate.get("dropReason", "") in _OPENER_RESTORABLE_REASONS
+                        and len(_seg_words(j)) >= 4):
+                    final_segs[j]["keep"] = True
+                    final_segs[j]["dropReason"] = ""
+                    print(
+                        f"  Dangling opener repair: restored [{j}] before "
+                        f"first-kept [{first_kept_idx}] which starts with '{first_word}'",
+                        file=sys.stderr,
+                    )
+                    break
+
+    return final_segs
+
+
+def _run_quota_enforcement(
+    api_key: str,
+    final_segs: list[dict],
+    lines: list[str],
+    n_cuts: int,
+) -> list[dict]:
+    """
+    Targeted post-pass: given a list of kept segments, ask the LLM to identify
+    the N weakest and cut them. Only called when actual cut rate lags target by
+    ≥ QUOTA_GAP_THRESHOLD.
+    """
+    kept_indices = [i for i, s in enumerate(final_segs) if s.get("keep")]
+    if not kept_indices or n_cuts <= 0:
+        return final_segs
+
+    kept_lines = "\n".join(f"[{i}] {lines[i]}" for i in kept_indices)
+
+    prompt = f"""You are a video editor. This edit needs {n_cuts} more segment(s) removed to hit the conciseness target.
+
+Below are the {len(kept_indices)} currently-kept segments. Return exactly the {n_cuts} index/indices that contribute the LEAST.
+
+Good cut candidates: orphaned single-word fragments, rambling wind-up phrases, weak/generic sign-offs,
+near-empty filler-only sentences, segments that repeat a point already made earlier.
+Bad cut candidates: topic introductions, segments carrying unique information, key transitions.
+
+Kept segments:
+{kept_lines}"""
+
+    try:
+        raw = _llm.generate(prompt, schema=QUOTA_SCHEMA, api_key=api_key)
+        result = _parse_json(raw)
+        cuts = [i for i in result.get("cuts", []) if isinstance(i, int)][:n_cuts]
+
+        actually_cut = 0
+        for idx in cuts:
+            if 0 <= idx < len(final_segs) and final_segs[idx].get("keep"):
+                final_segs[idx]["keep"] = False
+                final_segs[idx]["dropReason"] = "ramble"
+                final_segs[idx]["decisionSource"] = "quota_enforcement"
+                actually_cut += 1
+        print(f"    → quota enforcement cut {actually_cut} more segment(s)", file=sys.stderr)
+    except Exception as e:
+        print(f"  Quota enforcement failed ({e}), skipping", file=sys.stderr)
+
+    return final_segs
 
 
 # Words that essentially never end a complete thought in spontaneous speech.
