@@ -57,7 +57,10 @@ FILLER_WORDS = [
 ]
 
 
-# ── Gemini helpers ────────────────────────────────────────────────────────────
+# ── LLM helper ───────────────────────────────────────────────────────────────
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import llm as _llm
 
 def _gemini_generate(
     api_key: str,
@@ -65,17 +68,8 @@ def _gemini_generate(
     schema: dict | None = None,
     model: str = "gemini-2.5-flash",
 ) -> str:
-    """Call Gemini and return the raw text response."""
-    from google import genai                  # type: ignore
-    from google.genai import types as gtypes  # type: ignore
-
-    client = genai.Client(api_key=api_key)
-    cfg = gtypes.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema if schema else None,
-    )
-    resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
-    return resp.text
+    """Call the configured LLM backend and return the raw text response."""
+    return _llm.generate(prompt, schema=schema, model=model, api_key=api_key)
 
 
 def _parse_json(text: str) -> dict:
@@ -479,9 +473,11 @@ earlier.
 Transcript ({n_segs} segments):
 {transcript_text}"""
 
-        # Use Pro for deeper reasoning on structural analysis; fallback to Flash
+        # Use Pro for deeper reasoning on structural analysis; fallback to Flash.
+        # When running locally (LLM_BASE_URL set), skip the Pro attempt entirely.
         raw = None
-        for model_name in ("gemini-2.5-pro", "gemini-2.5-flash"):
+        candidates = ["gemini-2.5-flash"] if _llm.is_local() else ["gemini-2.5-pro", "gemini-2.5-flash"]
+        for model_name in candidates:
             try:
                 raw = _gemini_generate(api_key, analysis_prompt, schema=None, model=model_name)
                 print(f"  Pass 1 using {model_name}", file=sys.stderr)

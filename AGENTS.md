@@ -137,10 +137,27 @@ Scores: **coherence**, **preservation**, **conciseness** (1–5 each) + false po
 ## Environment
 
 ```bash
-GEMINI_API_KEY=...   # required — used by orchestrator + eval judge
+GEMINI_API_KEY=...   # required for Gemini backend
 ```
 
 Set in `.env.local` for Next.js routes. Scripts read it from the environment directly.
+
+### Swapping to a local LLM (LM Studio, Ollama, etc.)
+
+When Gemini quota runs out, point the pipeline at any OpenAI-compatible server:
+
+```bash
+export LLM_BASE_URL=http://127.0.0.1:1234   # LM Studio default
+export LLM_MODEL=google/gemma-4-e4b          # model loaded in LM Studio
+# LLM_API_KEY defaults to "lm-studio" — fine for local use
+
+# Then run normally — no GEMINI_API_KEY needed
+.venv/bin/python3 scripts/orchestrator.py video.mp4 --save-fixture --no-vision
+.venv/bin/python3 scripts/eval.py
+```
+
+`scripts/llm.py` handles routing. `LLM_BASE_URL` takes priority over `GEMINI_API_KEY`.
+Uses `response_format: json_schema` for structured outputs (supported by LM Studio ≥ 0.3).
 
 ## Ignored by git
 

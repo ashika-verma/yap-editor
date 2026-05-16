@@ -106,16 +106,9 @@ patterns (e.g. "consistently cuts too early before a point lands" or "misses rep
 
 def judge_plan(plan: dict, api_key: str, model: str = "gemini-2.5-flash") -> dict:
     """Score an edit plan. Returns a dict matching JUDGE_SCHEMA."""
-    from google import genai                   # type: ignore
-    from google.genai import types as gtypes   # type: ignore
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import llm
 
-    client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=model,
-        contents=_build_prompt(plan),
-        config=gtypes.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=JUDGE_SCHEMA,
-        ),
-    )
-    return json.loads(resp.text)
+    text = llm.generate(_build_prompt(plan), schema=JUDGE_SCHEMA, model=model, api_key=api_key)
+    return json.loads(text)
