@@ -4,6 +4,8 @@ import { useState, useMemo } from "react";
 import {
   buildCleanTranscript,
   FillerSensitivity,
+  JudgeItem,
+  JudgeResult,
   NarrativeAnalysis,
   Segment,
   WordCut,
@@ -21,11 +23,17 @@ interface Props {
   videoUrl: string | null;
   fillerSensitivity: FillerSensitivity;
   isReplanning?: boolean;
+  isJudging?: boolean;
+  isRefining?: boolean;
+  refineIterations?: number;
+  judgeResult?: JudgeResult | null;
   onToggle: (index: number) => void;
   onToggleWordCut: (segmentIndex: number, wordIndex: number, range: boolean) => void;
   onResetToGemini: () => void;
   onToggleAll: (keep: boolean) => void;
   onSensitivityChange: (s: FillerSensitivity) => void;
+  onJudge?: () => void;
+  onRefine?: () => void;
 }
 
 const DROP_REASON_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -56,11 +64,17 @@ export function TranscriptEditor({
   videoUrl,
   fillerSensitivity,
   isReplanning = false,
+  isJudging = false,
+  isRefining = false,
+  refineIterations = 0,
+  judgeResult = null,
   onToggle,
   onToggleWordCut,
   onResetToGemini,
   onToggleAll,
   onSensitivityChange,
+  onJudge,
+  onRefine,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
   const [filter, setFilter] = useState<"all" | "keep" | "drop" | "risky">("all");
@@ -363,8 +377,65 @@ export function TranscriptEditor({
             </svg>
             Gemini's picks
           </button>
+
+          {onJudge && (
+            <button
+              onClick={onJudge}
+              disabled={isJudging || isRefining}
+              className="text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5"
+              style={{
+                borderColor: isJudging ? "rgba(234,179,8,0.4)" : "rgba(234,179,8,0.3)",
+                color: isJudging ? "#eab308" : "#ca8a04",
+                background: isJudging ? "rgba(234,179,8,0.08)" : "rgba(234,179,8,0.04)",
+                opacity: isRefining ? 0.5 : 1,
+              }}
+            >
+              {isJudging ? (
+                <><div className="spinner" style={{ width: 8, height: 8, borderWidth: 1.2 }} />judging…</>
+              ) : (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M5 1v4l2.5 1.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                    <circle cx="5" cy="5" r="4" stroke="currentColor" strokeWidth="1.2"/>
+                  </svg>
+                  Judge
+                </>
+              )}
+            </button>
+          )}
+
+          {onRefine && (
+            <button
+              onClick={onRefine}
+              disabled={isJudging || isRefining}
+              className="text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5"
+              style={{
+                borderColor: isRefining ? "rgba(16,185,129,0.4)" : "rgba(16,185,129,0.3)",
+                color: isRefining ? "#10b981" : "#059669",
+                background: isRefining ? "rgba(16,185,129,0.08)" : "rgba(16,185,129,0.04)",
+                opacity: isJudging ? 0.5 : 1,
+              }}
+            >
+              {isRefining ? (
+                <><div className="spinner" style={{ width: 8, height: 8, borderWidth: 1.2 }} />refining{refineIterations > 0 ? ` (${refineIterations})` : "…"}</>
+              ) : (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M1 5a4 4 0 104-4M1 1v4h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                    <circle cx="5" cy="5" r="1.2" fill="currentColor"/>
+                  </svg>
+                  Auto-refine
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Judge results panel */}
+      {judgeResult && (
+        <JudgePanel result={judgeResult} segments={segments} onToggle={onToggle} />
+      )}
 
       {/* Video preview toggle */}
       {videoUrl && (
@@ -795,6 +866,128 @@ function Stat({
       >
         {value}
       </p>
+    </div>
+  );
+}
+
+function JudgePanel({
+  result,
+  segments,
+  onToggle,
+}: {
+  result: JudgeResult;
+  segments: Segment[];
+  onToggle: (index: number) => void;
+}) {
+  const fps = result.false_positives ?? [];
+  const fns = result.false_negatives ?? [];
+  const hasFeedback = fps.length > 0 || fns.length > 0;
+  const cohColor =
+    result.coherence >= 85 ? "#22c55e" : result.coherence >= 70 ? "#eab308" : "#ef4444";
+
+  return (
+    <div
+      className="rounded-xl border p-5 space-y-4"
+      style={{ borderColor: "rgba(234,179,8,0.25)", background: "rgba(234,179,8,0.03)" }}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 1.5v5l3 1.5" stroke="#eab308" strokeWidth="1.4" strokeLinecap="round"/>
+            <circle cx="7" cy="7" r="5.5" stroke="#eab308" strokeWidth="1.4"/>
+          </svg>
+          <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#eab308", fontFamily: "'Syne', sans-serif" }}>
+            Judge&apos;s review
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          {(["coherence", "preservation", "conciseness"] as const).map((k) => (
+            <div key={k} className="flex items-center gap-1">
+              <span className="text-xs" style={{ color: "var(--muted-foreground)", fontSize: "10px", textTransform: "uppercase" }}>{k.slice(0, 3)}</span>
+              <span
+                className="text-xs font-semibold"
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  color: k === "coherence" ? cohColor : "var(--foreground)",
+                }}
+              >
+                {result[k]}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {result.overall_notes && (
+        <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+          {result.overall_notes}
+        </p>
+      )}
+
+      {hasFeedback ? (
+        <div className="space-y-2">
+          {fps.map((fp) => (
+            <RepairRow key={`fp-${fp.segment_index}`} item={fp} action="restore" segments={segments} onToggle={onToggle} />
+          ))}
+          {fns.map((fn) => (
+            <RepairRow key={`fn-${fn.segment_index}`} item={fn} action="drop" segments={segments} onToggle={onToggle} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs" style={{ color: "#22c55e" }}>No specific repairs suggested — edit looks clean.</p>
+      )}
+    </div>
+  );
+}
+
+function RepairRow({
+  item,
+  action,
+  segments,
+  onToggle,
+}: {
+  item: JudgeItem;
+  action: "restore" | "drop";
+  segments: Segment[];
+  onToggle: (index: number) => void;
+}) {
+  const seg = segments[item.segment_index];
+  const alreadyApplied = seg && (action === "restore" ? seg.keep : !seg.keep);
+  const accentColor = action === "restore" ? "#22c55e" : "#ef4444";
+  const label = action === "restore" ? "Restore" : "Drop";
+
+  return (
+    <div
+      className="flex items-start gap-3 rounded-lg p-3"
+      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}
+    >
+      <div className="flex-1 min-w-0 space-y-1">
+        <span
+          className="text-xs font-mono px-1.5 py-0.5 rounded"
+          style={{ background: `${accentColor}18`, color: accentColor, fontSize: "10px" }}
+        >
+          [{item.segment_index}] {action === "restore" ? "cut → keep" : "keep → drop"}
+        </span>
+        <p className="text-xs leading-snug" style={{ color: "var(--foreground)", opacity: 0.85 }}>
+          &ldquo;{item.text.slice(0, 120)}{item.text.length > 120 ? "…" : ""}&rdquo;
+        </p>
+        <p className="text-xs leading-snug" style={{ color: "var(--muted-foreground)" }}>
+          {item.reason}
+        </p>
+      </div>
+      <button
+        onClick={() => { if (!alreadyApplied) onToggle(item.segment_index); }}
+        disabled={!!alreadyApplied}
+        className="flex-shrink-0 text-xs px-3 py-1.5 rounded-lg border transition-colors"
+        style={{
+          borderColor: alreadyApplied ? "var(--border)" : `${accentColor}40`,
+          color: alreadyApplied ? "var(--muted-foreground)" : accentColor,
+          background: alreadyApplied ? "transparent" : `${accentColor}0a`,
+          opacity: alreadyApplied ? 0.5 : 1,
+        }}
+      >
+        {alreadyApplied ? "Applied" : label}
+      </button>
     </div>
   );
 }

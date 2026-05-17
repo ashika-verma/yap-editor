@@ -99,6 +99,24 @@ export type EditPlan = {
   narrativeAnalysis?: NarrativeAnalysis;
 };
 
+export type JudgeItem = {
+  segment_index: number;
+  text: string;
+  reason: string;
+};
+
+export type JudgeResult = {
+  coherence: number;
+  preservation: number;
+  conciseness: number;
+  coherence_reason: string;
+  preservation_reason: string;
+  conciseness_reason: string;
+  false_positives: JudgeItem[];
+  false_negatives: JudgeItem[];
+  overall_notes: string;
+};
+
 export function buildCleanTranscript(segments: Segment[]): string {
   return segments
     .filter((segment) => segment.keep)

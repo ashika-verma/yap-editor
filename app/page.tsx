@@ -9,6 +9,7 @@ import {
   buildCleanTranscript as buildTranscriptText,
   EditPlan,
   FillerSensitivity,
+  JudgeResult,
   WordCut,
   wordCutId,
 } from "@/lib/editPlan";
@@ -28,6 +29,10 @@ export default function Home() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
+  const [isJudging, setIsJudging] = useState(false);
+  const [isRefining, setIsRefining] = useState(false);
+  const [refineIterations, setRefineIterations] = useState(0);
+  const [judgeResult, setJudgeResult] = useState<JudgeResult | null>(null);
   const [lastWordSelection, setLastWordSelection] = useState<{
     segmentIndex: number;
     wordIndex: number;
@@ -102,6 +107,7 @@ export default function Home() {
   }, [handleTranscribe]);
 
   const handleToggleSegment = (index: number) => {
+    setJudgeResult(null);
     setPlan((prev) =>
       prev
         ? {
@@ -152,6 +158,56 @@ export default function Home() {
       setIsReplanning(false);
     }
   };
+
+  const handleJudge = useCallback(async () => {
+    if (!plan) return;
+    setIsJudging(true);
+    setJudgeResult(null);
+    try {
+      const res = await fetch("/api/judge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Judge failed");
+      }
+      const result: JudgeResult = await res.json();
+      setJudgeResult(result);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Judge failed");
+    } finally {
+      setIsJudging(false);
+    }
+  }, [plan]);
+
+  const handleRefine = useCallback(async () => {
+    if (!plan) return;
+    setIsRefining(true);
+    setRefineIterations(0);
+    setJudgeResult(null);
+    try {
+      const res = await fetch("/api/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, maxIterations: 20, targetCoherence: 85 }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Refine failed");
+      }
+      const data: { plan: EditPlan; iterations: number; finalScore: JudgeResult } = await res.json();
+      setPlan(data.plan);
+      setJudgeResult(data.finalScore);
+      setRefineIterations(data.iterations);
+      toast.success(`Refined in ${data.iterations} iteration${data.iterations !== 1 ? "s" : ""} — coherence ${data.finalScore?.coherence ?? "?"}/100`);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Refine failed");
+    } finally {
+      setIsRefining(false);
+    }
+  }, [plan]);
 
   const buildCleanTranscript = useCallback(() => {
     return buildTranscriptText(segments);
@@ -465,11 +521,17 @@ export default function Home() {
               videoUrl={videoUrl}
               fillerSensitivity={fillerSensitivity}
               isReplanning={isReplanning}
+              isJudging={isJudging}
+              isRefining={isRefining}
+              refineIterations={refineIterations}
+              judgeResult={judgeResult}
               onToggle={handleToggleSegment}
               onToggleWordCut={handleToggleWordCut}
               onResetToGemini={handleResetToGemini}
               onToggleAll={handleToggleAll}
               onSensitivityChange={handleSensitivityChange}
+              onJudge={handleJudge}
+              onRefine={handleRefine}
             />
             <ExportPanel
               stage={stage}
