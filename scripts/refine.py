@@ -14,7 +14,7 @@ an earlier iteration won't be dropped in a later one, and vice versa.
 Outputs {"plan": dict, "iterations": int, "finalScore": {coherence, ...}} to stdout.
 """
 from __future__ import annotations
-import json, os, sys
+import json, os, sys, time, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_judge import judge_plan
@@ -36,10 +36,23 @@ def refine(plan: dict, max_iterations: int, target_coherence: int, api_key: str)
         print(f"[refine] iteration {iterations}…", file=sys.stderr)
 
         try:
-            score = judge_plan(current_plan, api_key)
+            score = judge_plan(current_plan, api_key, strict=True)
         except Exception as e:
-            print(f"[refine] judge failed: {e}", file=sys.stderr)
-            break
+            err_str = str(e)
+            # Gemini rate-limit: parse retryDelay and wait rather than aborting
+            match = re.search(r"retry.*?(\d+)s", err_str, re.IGNORECASE)
+            wait_sec = int(match.group(1)) + 5 if match else None
+            if wait_sec and "429" in err_str:
+                print(f"[refine] rate-limited — waiting {wait_sec}s…", file=sys.stderr)
+                time.sleep(wait_sec)
+                try:
+                    score = judge_plan(current_plan, api_key, strict=True)
+                except Exception as e2:
+                    print(f"[refine] judge failed after retry: {e2}", file=sys.stderr)
+                    break
+            else:
+                print(f"[refine] judge failed: {e}", file=sys.stderr)
+                break
 
         last_score = score
         coh = score.get("coherence", 0)

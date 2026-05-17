@@ -51,7 +51,7 @@ JUDGE_SCHEMA = {
 }
 
 
-def _build_prompt(plan: dict) -> str:
+def _build_prompt(plan: dict, strict: bool = False) -> str:
     segments  = plan.get("segments", [])
     n_total   = len(segments)
     n_kept    = sum(1 for s in segments if s.get("keep"))
@@ -95,9 +95,8 @@ Score each dimension 0–100 using these anchors:
   20–39   Poor — many broken joins; meaning frequently unclear
   0–19    Very poor — incoherent; viewer is lost throughout
 
-An edit that removes clear tangents and filler while preserving the main
-narrative, with at most minor roughness at a few joins, should score 90+.
 Use the full range. Fine-grained scores (e.g. 72, 88, 95) are expected and preferred.
+{"" if strict else "An edit that removes clear tangents and filler while preserving the main narrative, with at most minor roughness at a few joins, should score 90+."}
 
 COHERENCE — Does the edited transcript flow naturally as a continuous narrative?
   Watch for: abrupt jumps, missing context, broken sentences at joins, mid-thought cuts.
@@ -108,21 +107,27 @@ PRESERVATION — Are the core ideas and the main story still intact in the edit?
 CONCISENESS — Is the cut level appropriate for the content?
   Watch for: over-cutting (loses meaning or sounds choppy), under-cutting (obvious flab remains).
 
-Also identify (max 3 each):
-- FALSE POSITIVES: segments that were CUT but should have been KEPT
-  (genuine content incorrectly removed — cite segment index, short quote, and why it matters)
-- FALSE NEGATIVES: segments that were KEPT but should have been CUT
-  (clear flab that survived — cite segment index, short quote, and why it adds nothing)
+REQUIRED — cite up to 3 of each. If coherence < 90, you MUST find at least one:
+- FALSE POSITIVES: specific segments that were CUT but should have been KEPT.
+  These are joins where context is missing because a segment was removed. Give the segment
+  index from the original transcript, a short quote, and exactly why restoring it would
+  fix a specific join or missing context.
+- FALSE NEGATIVES: specific segments that were KEPT but should have been CUT.
+  These are segments that add no information, repeat something already said, or interrupt
+  flow. Give the segment index, a short quote, and exactly why cutting it improves the edit.
+
+If you noted an abrupt jump or missing context in overall_notes, trace it to a specific
+dropped segment index and list it as a false positive.
 
 Note in overall_notes any systemic patterns (e.g. "consistently cuts too early before a point
 lands" or "misses repetitions")."""
 
 
-def judge_plan(plan: dict, api_key: str, model: str = "gemini-2.5-flash") -> dict:
+def judge_plan(plan: dict, api_key: str, model: str = "gemini-2.5-flash", strict: bool = False) -> dict:
     """Score an edit plan. Returns a dict matching JUDGE_SCHEMA."""
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import llm
 
-    text = llm.generate(_build_prompt(plan), schema=JUDGE_SCHEMA, model=model, api_key=api_key)
+    text = llm.generate(_build_prompt(plan, strict=strict), schema=JUDGE_SCHEMA, model=model, api_key=api_key)
     return json.loads(text)
