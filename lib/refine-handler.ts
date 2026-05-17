@@ -42,7 +42,7 @@ export async function handleRefine(req: NextRequest) {
 
   try {
     return NextResponse.json(
-      await runRefine({ plan, maxIterations: maxIterations ?? 20, targetCoherence: targetCoherence ?? 85 }),
+      await runRefine({ plan, maxIterations: maxIterations ?? 20, targetCoherence: targetCoherence ?? 95 }),
     );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

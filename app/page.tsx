@@ -191,7 +191,7 @@ export default function Home() {
       const res = await fetch("/api/refine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan, maxIterations: 20, targetCoherence: 85 }),
+        body: JSON.stringify({ plan, maxIterations: 20, targetCoherence: 95 }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -201,7 +201,9 @@ export default function Home() {
       setPlan(data.plan);
       setJudgeResult(data.finalScore);
       setRefineIterations(data.iterations);
-      toast.success(`Refined in ${data.iterations} iteration${data.iterations !== 1 ? "s" : ""} — coherence ${data.finalScore?.coherence ?? "?"}/100`);
+      const coh = data.finalScore?.coherence ?? "?";
+      const hitTarget = typeof coh === "number" && coh >= 95;
+      toast.success(`Refined in ${data.iterations} iteration${data.iterations !== 1 ? "s" : ""} — coherence ${coh}/100${hitTarget ? " ✓" : " (best achieved)"}`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Refine failed");
     } finally {
