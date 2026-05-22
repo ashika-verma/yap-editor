@@ -46,7 +46,8 @@ interface Segment {
 
 const WORD_CUT_PAD_PRE  = 0.003; // pre-cut margin before renderStartSec
 const WORD_CUT_PAD_POST = 0.030; // post-cut margin after renderEndSec
-const MIN_SPAN      = 0.05;  // lowered from 0.15 — short spans near word cuts must survive
+const MIN_SPAN        = 0.15;  // minimum keep-span duration — anything shorter is inaudible
+const COALESCE_GAP    = 0.12;  // merge cut zones separated by less than this (inter-word silence)
 const PRE_ROLL      = 0.08;
 const POST_ROLL     = 0.25;
 const AUDIO_FADE    = 0.025; // fade at segment group edges
@@ -57,18 +58,34 @@ function computeKeepSpans(
   rangeEnd: number,
   wordCuts: WordCut[]
 ): Array<{ startSec: number; endSec: number }> {
-  if (wordCuts.length === 0) return [{ startSec: rangeStart, endSec: rangeEnd }];
+  // No word cuts — keep the whole range if it clears MIN_SPAN, else drop it.
+  // (Previously this was an unconditional early return, which let tiny groups
+  // sneak through without the MIN_SPAN gate.)
+  if (wordCuts.length === 0) {
+    return (rangeEnd - rangeStart >= MIN_SPAN) ? [{ startSec: rangeStart, endSec: rangeEnd }] : [];
+  }
 
-  const zones = wordCuts
+  const rawZones = wordCuts
     .map((wc) => ({
-      // Cap with surgeon's acoustic boundaries so the cut zone never starts before
-      // the preceding word's acoustic end (wc.startSec) or ends after the following
-      // word's acoustic onset (wc.endSec), preventing adjacent speech from being clipped.
       s: Math.max((wc.renderStartSec ?? wc.startSec) - WORD_CUT_PAD_PRE, wc.startSec, rangeStart),
       e: Math.min((wc.renderEndSec ?? wc.endSec)   + WORD_CUT_PAD_POST, wc.endSec,   rangeEnd),
     }))
     .filter((z) => z.e > z.s)
     .sort((a, b) => a.s - b.s);
+
+  // Coalesce cut zones separated by less than COALESCE_GAP (inter-word silences).
+  // Multiple consecutive manual word-cuts each span one Whisper word timestamp,
+  // leaving tiny acoustic gaps between them. A gap under 120 ms is inter-word
+  // silence — not content worth keeping. Merging the zones eliminates those gaps.
+  const zones: typeof rawZones = [];
+  for (const z of rawZones) {
+    const last = zones[zones.length - 1];
+    if (last && z.s - last.e < COALESCE_GAP) {
+      last.e = Math.max(last.e, z.e);
+    } else {
+      zones.push({ ...z });
+    }
+  }
 
   const spans: Array<{ startSec: number; endSec: number }> = [];
   let cursor = rangeStart;
@@ -79,7 +96,11 @@ function computeKeepSpans(
   }
   if (rangeEnd - cursor >= MIN_SPAN) spans.push({ startSec: cursor, endSec: rangeEnd });
 
-  return spans.length > 0 ? spans : [{ startSec: rangeStart, endSec: rangeEnd }];
+  // Return spans as-is, even if empty. An empty result means the user's cuts left
+  // only sub-MIN_SPAN remnants — those are dropped, not restored to the full range.
+  // (The old fallback `spans.length > 0 ? spans : [fullRange]` was causing cut
+  // content to reappear when all remaining keep-spans were individually < MIN_SPAN.)
+  return spans;
 }
 
 /**

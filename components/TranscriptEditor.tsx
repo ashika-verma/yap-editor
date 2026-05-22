@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import {
   buildCleanTranscript,
   FillerSensitivity,
@@ -29,6 +29,7 @@ interface Props {
   judgeResult?: JudgeResult | null;
   onToggle: (index: number) => void;
   onToggleWordCut: (segmentIndex: number, wordIndex: number, range: boolean) => void;
+  onCutRange: (segIdx: number, startWordIdx: number, endWordIdx: number) => void;
   onResetToGemini: () => void;
   onToggleAll: (keep: boolean) => void;
   onSensitivityChange: (s: FillerSensitivity) => void;
@@ -54,6 +55,52 @@ function formatSeconds(sec: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// ── Word-level cut helpers ─────────────────────────────────────────────────────
+
+function findWordCut(seg: Segment, word: WordTimestamp, wordIndex: number): WordCut | undefined {
+  const id = wordCutId(seg, wordIndex);
+  return (seg.wordCuts ?? []).find(
+    (cut) => cut.id === id || (word.start >= cut.startSec && word.end <= cut.endSec),
+  );
+}
+
+function findWordSpan(node: Node | null): HTMLElement | null {
+  let el = (node instanceof HTMLElement ? node : node?.parentElement) ?? null;
+  while (el) {
+    if (el.dataset.seg !== undefined && el.dataset.word !== undefined) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function getSelectionWordPairs(
+  container: HTMLElement,
+  segments: Segment[],
+): { segIdx: number; wordIdx: number }[] | null {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const anchorSpan = findWordSpan(sel.anchorNode);
+  const focusSpan  = findWordSpan(sel.focusNode);
+  if (!anchorSpan || !focusSpan) return null;
+  const allSpans = Array.from(container.querySelectorAll<HTMLElement>("[data-seg][data-word]"));
+  const ai = allSpans.indexOf(anchorSpan);
+  const fi = allSpans.indexOf(focusSpan);
+  if (ai === -1 || fi === -1) return null;
+  const [lo, hi] = ai <= fi ? [ai, fi] : [fi, ai];
+  return allSpans.slice(lo, hi + 1).flatMap((span) => {
+    const segIdx  = parseInt(span.dataset.seg  ?? "", 10);
+    const wordIdx = parseInt(span.dataset.word ?? "", 10);
+    if (isNaN(segIdx) || isNaN(wordIdx)) return [];
+    if (!segments[segIdx]?.keep) return [];     // dropped segments can't take word cuts
+    return [{ segIdx, wordIdx }];
+  });
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+// Each undo entry is one cut action, which may span one or more segments
+type UndoRange = { segIdx: number; startWordIdx: number; endWordIdx: number };
+
 export function TranscriptEditor({
   segments,
   summary,
@@ -70,6 +117,7 @@ export function TranscriptEditor({
   judgeResult = null,
   onToggle,
   onToggleWordCut,
+  onCutRange,
   onResetToGemini,
   onToggleAll,
   onSensitivityChange,
@@ -77,8 +125,42 @@ export function TranscriptEditor({
   onRefine,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
-  const [filter, setFilter] = useState<"all" | "keep" | "drop" | "risky">("all");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied]       = useState(false);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [selPairs, setSelPairs]   = useState<{ segIdx: number; wordIdx: number }[] | null>(null);
+  const [undoStack, setUndoStack] = useState<UndoRange[][]>([]);
+
+  // selectionchange fires on every selection change (mouse AND keyboard navigation).
+  // This replaces the old mouseUp handler and enables Shift+arrow extension.
+  useEffect(() => {
+    const handleSelChange = () => {
+      const container = containerRef.current;
+      if (!container) return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setSelPairs(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      if (!container.contains(range.commonAncestorContainer)) {
+        setSelPairs(null);
+        return;
+      }
+      const pairs = getSelectionWordPairs(container, segments);
+      if (pairs && pairs.length > 0) {
+        setSelPairs(pairs);
+        // Ensure the container has keyboard focus so Backspace/Cmd+Z fire here
+        if (document.activeElement !== container) {
+          container.focus({ preventScroll: true });
+        }
+      } else {
+        setSelPairs(null);
+      }
+    };
+    document.addEventListener("selectionchange", handleSelChange);
+    return () => document.removeEventListener("selectionchange", handleSelChange);
+  }, [segments]);
 
   const handleCopyTranscript = () => {
     const text = buildCleanTranscript(segments);
@@ -88,48 +170,52 @@ export function TranscriptEditor({
     });
   };
 
-  const totalSegments = segments.length;
-  const droppedCount = totalSegments - keptCount;
-  const totalSeconds = segments.reduce((a, s) => a + (s.endSec - s.startSec), 0);
-  const savedSeconds = totalSeconds - keptSeconds;
-  const keptPct = totalSeconds > 0 ? Math.round((keptSeconds / totalSeconds) * 100) : 0;
+  const totalSegments  = segments.length;
+  const totalSeconds   = segments.reduce((a, s) => a + (s.endSec - s.startSec), 0);
+  const savedSeconds   = totalSeconds - keptSeconds;
+  const keptPct        = totalSeconds > 0 ? Math.round((keptSeconds / totalSeconds) * 100) : 0;
+  const riskyKept      = segments.filter((s) => s.keep && s.jobRisk);
+  const riskyCount     = riskyKept.length;
 
-  const riskyKeptSegments = segments.filter((s) => s.keep && s.jobRisk);
-  const riskyCount = riskyKeptSegments.length;
-
-  const filtered =
-    filter === "keep"
-      ? segments.filter((s) => s.keep)
-      : filter === "drop"
-      ? segments.filter((s) => !s.keep)
-      : filter === "risky"
-      ? segments.filter((s) => s.jobRisk)
-      : segments;
-
-  type GapItem = { type: "gap"; dropped: Segment[]; afterRealIdx: number };
-  type SegItem  = { type: "segment"; seg: Segment; realIdx: number };
-
-  // In "keep" view, inject gap cards between consecutive kept segments that have
-  // dropped segments between them — makes broken-sentence cuts immediately visible.
-  const renderList = useMemo<Array<SegItem | GapItem>>(() => {
-    if (filter !== "keep") {
-      return filtered.map((seg) => ({ type: "segment", seg, realIdx: segments.indexOf(seg) }));
-    }
-    const items: Array<SegItem | GapItem> = [];
-    for (let i = 0; i < filtered.length; i++) {
-      const seg = filtered[i];
-      const realIdx = segments.indexOf(seg);
-      items.push({ type: "segment", seg, realIdx });
-      if (i < filtered.length - 1) {
-        const nextRealIdx = segments.indexOf(filtered[i + 1]);
-        const dropped = segments.slice(realIdx + 1, nextRealIdx).filter((s) => !s.keep);
-        if (dropped.length > 0) {
-          items.push({ type: "gap", dropped, afterRealIdx: realIdx });
-        }
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "Escape") {
+        setSelPairs(null);
+        window.getSelection()?.removeAllRanges();
+        return;
       }
-    }
-    return items;
-  }, [filter, filtered, segments]);
+      if (e.key === "Backspace" && selPairs && selPairs.length > 0) {
+        e.preventDefault();
+        // Group selected words by segment, then create one spanning cut per segment
+        const bySegment = new Map<number, number[]>();
+        for (const { segIdx, wordIdx } of selPairs) {
+          if (!bySegment.has(segIdx)) bySegment.set(segIdx, []);
+          bySegment.get(segIdx)!.push(wordIdx);
+        }
+        const undoEntry: UndoRange[] = [];
+        for (const [segIdx, wordIndices] of bySegment) {
+          const min = Math.min(...wordIndices);
+          const max = Math.max(...wordIndices);
+          undoEntry.push({ segIdx, startWordIdx: min, endWordIdx: max });
+          onCutRange(segIdx, min, max);
+        }
+        setUndoStack((prev) => [...prev.slice(-19), undoEntry]);
+        setSelPairs(null);
+        window.getSelection()?.removeAllRanges();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey && undoStack.length > 0) {
+        e.preventDefault();
+        const last = undoStack[undoStack.length - 1];
+        for (const { segIdx, startWordIdx, endWordIdx } of last) {
+          onCutRange(segIdx, startWordIdx, endWordIdx);
+        }
+        setUndoStack((prev) => prev.slice(0, -1));
+        return;
+      }
+    },
+    [selPairs, undoStack, onCutRange],
+  );
 
   return (
     <div className="space-y-6">
@@ -149,7 +235,7 @@ export function TranscriptEditor({
           </div>
           <div className="flex-1 min-w-0 space-y-2">
             <p className="text-xs font-medium" style={{ color: "var(--primary)", fontFamily: "'Syne', sans-serif", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-              Gemini's narrative read
+              Gemini&apos;s narrative read
             </p>
             {narrativeAnalysis?.coreStory && (
               <div className="space-y-0.5">
@@ -164,7 +250,6 @@ export function TranscriptEditor({
             <p className="text-sm leading-relaxed" style={{ color: "var(--foreground)", opacity: 0.75 }}>
               {summary}
             </p>
-            {/* Structural findings */}
             {(narrativeAnalysis?.tangents?.length || narrativeAnalysis?.repetitionGroups?.length || narrativeAnalysis?.circularSections?.length) ? (
               <div className="flex flex-wrap gap-1.5 pt-0.5">
                 {narrativeAnalysis.tangents?.map((t, i) => (
@@ -213,16 +298,9 @@ export function TranscriptEditor({
               {riskyCount} kept segment{riskyCount > 1 ? "s" : ""} may be professionally risky
             </p>
             <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
-              Gemini flagged content that could embarrass you with your employer or online. Review and drop before exporting.
+              Flagged content is marked with a red left-border in the document below. Review before exporting.
             </p>
           </div>
-          <button
-            onClick={() => setFilter("risky")}
-            className="flex-shrink-0 text-xs px-2.5 py-1 rounded-lg border transition-colors"
-            style={{ borderColor: "rgba(239,68,68,0.3)", color: "#ef4444", background: "rgba(239,68,68,0.08)", whiteSpace: "nowrap" }}
-          >
-            Review
-          </button>
         </div>
       )}
 
@@ -238,7 +316,7 @@ export function TranscriptEditor({
           <Stat label="Segments" value={`${keptCount} / ${totalSegments} kept`} mono />
         </div>
 
-        {/* Timeline preview bar */}
+        {/* Timeline bar — click segments to toggle keep/drop */}
         <div className="space-y-1.5">
           <div className="flex h-3 rounded-full overflow-hidden gap-px" style={{ background: "var(--secondary)" }}>
             {segments.map((seg, i) => {
@@ -246,7 +324,7 @@ export function TranscriptEditor({
               return (
                 <button
                   key={i}
-                  title={seg.text.slice(0, 60)}
+                  title={`${seg.keep ? "kept" : "dropped"}: ${seg.text.slice(0, 60)}`}
                   onClick={() => onToggle(i)}
                   className="h-full transition-opacity hover:opacity-80"
                   style={{
@@ -261,8 +339,7 @@ export function TranscriptEditor({
           </div>
           <div className="flex justify-between text-xs" style={{ color: "var(--muted-foreground)", fontFamily: "'JetBrains Mono', monospace" }}>
             <span>0:00</span>
-            <span style={{ color: "var(--keep)", fontSize: "10px" }}>■ keep</span>
-            <span style={{ color: "var(--drop)", fontSize: "10px" }}>■ drop</span>
+            <span className="text-xs" style={{ color: "var(--muted-foreground)", fontSize: "10px" }}>click bar segments to toggle keep/drop</span>
             <span>{totalDuration}</span>
           </div>
         </div>
@@ -270,30 +347,6 @@ export function TranscriptEditor({
 
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-2 animate-fade-in-up-delay-3">
-        <div
-          className="flex rounded-lg overflow-hidden border text-xs"
-          style={{ borderColor: "var(--border)" }}
-        >
-          {(["all", "keep", "drop", "risky"] as const).map((f, i, arr) => {
-            const count = f === "keep" ? keptCount : f === "drop" ? droppedCount : f === "risky" ? segments.filter(s => s.jobRisk).length : totalSegments;
-            const isRisky = f === "risky";
-            return (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className="px-3 py-1.5 capitalize transition-colors duration-100"
-                style={{
-                  background: filter === f ? (isRisky ? "rgba(239,68,68,0.1)" : "var(--secondary)") : "transparent",
-                  color: filter === f ? (isRisky ? "#ef4444" : "var(--foreground)") : isRisky && count > 0 ? "rgba(239,68,68,0.7)" : "var(--muted-foreground)",
-                  borderRight: i < arr.length - 1 ? "1px solid var(--border)" : "none",
-                }}
-              >
-                {f === "risky" ? "⚠ risky" : f} ({count})
-              </button>
-            );
-          })}
-        </div>
-
         {/* Filler sensitivity */}
         <div className="flex items-center gap-1.5">
           <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>fillers:</span>
@@ -316,9 +369,7 @@ export function TranscriptEditor({
             ))}
           </div>
           {isReplanning && (
-            <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-              updating…
-            </span>
+            <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>updating…</span>
           )}
         </div>
 
@@ -375,7 +426,7 @@ export function TranscriptEditor({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1.5 5A3.5 3.5 0 105 1.5M1.5 1.5V5H5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            Gemini's picks
+            Gemini&apos;s picks
           </button>
 
           {onJudge && (
@@ -463,296 +514,141 @@ export function TranscriptEditor({
         </div>
       )}
 
-      {/* Segments */}
-      <div
-        className="rounded-xl border overflow-hidden"
-        style={{ borderColor: "var(--border)" }}
-      >
-        <div className="overflow-y-auto" style={{ maxHeight: "60vh" }}>
-          {renderList.map((item, displayIdx) => {
-            if (item.type === "gap") {
-              const preview = item.dropped.map((s) => s.text).join(" ").slice(0, 120);
-              return (
-                <div
-                  key={`gap-${item.afterRealIdx}`}
-                  className="px-4 py-2.5 flex items-start gap-3 border-b"
-                  style={{ borderColor: "var(--border)", background: "rgba(99,102,241,0.03)" }}
-                >
-                  <div className="flex-shrink-0 mt-0.5" style={{ width: 90 }}>
-                    <span className="text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.5, fontFamily: "'JetBrains Mono', monospace", fontSize: "10px" }}>
-                      ↕ {item.dropped.length} cut
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs leading-relaxed italic" style={{ color: "var(--muted-foreground)", opacity: 0.6 }}>
-                      "{preview}{preview.length < item.dropped.map((s) => s.text).join(" ").length ? "…" : ""}"
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => item.dropped.forEach((s) => onToggle(segments.indexOf(s)))}
-                    className="flex-shrink-0 text-xs px-2 py-1 rounded border transition-colors"
-                    style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent", whiteSpace: "nowrap" }}
-                    onMouseEnter={(e) => { (e.currentTarget).style.color = "var(--foreground)"; }}
-                    onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
-                  >
-                    restore
-                  </button>
-                </div>
-              );
-            }
-
-            const { seg, realIdx } = item;
+      {/* Document view */}
+      <div className="rounded-xl border overflow-hidden" style={{ borderColor: "var(--border)" }}>
+        <div
+          ref={containerRef}
+          tabIndex={0}
+          onKeyDown={handleKeyDown}
+          className="focus:outline-none"
+          style={{
+            fontSize: "14px",
+            lineHeight: 1.9,
+            padding: "28px 32px",
+            background: "var(--card)",
+            maxHeight: "65vh",
+            overflowY: "auto",
+            cursor: "text",
+            userSelect: "text",
+          }}
+        >
+          {segments.map((seg, si) => {
+            const isDrop     = !seg.keep;
+            const hasJobRisk = Boolean(seg.keep && seg.jobRisk);
             const reasonMeta = seg.dropReason ? DROP_REASON_LABELS[seg.dropReason] : null;
-            return (
-              <div
-                key={realIdx}
-                className={`segment-row border-b flex items-start gap-0 transition-all duration-150 ${seg.keep ? "segment-keep" : "segment-drop"}`}
-                style={{
-                  borderColor: "var(--border)",
-                  borderLeft: `3px solid ${seg.keep && seg.jobRisk ? "#ef4444" : seg.keep ? "var(--keep)" : "var(--drop)"}`,
-                }}
-              >
-                {/* Timestamp */}
-                <div
-                  className="flex-shrink-0 px-4 py-3.5 text-right select-none flex flex-col justify-between"
-                  style={{ width: 90, borderRight: "1px solid var(--border)" }}
-                >
-                  <div>
-                    <span
-                      className="text-xs block"
-                      style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted-foreground)" }}
-                    >
-                      {seg.start}
-                    </span>
-                    <span
-                      className="text-xs block"
-                      style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--muted-foreground)", opacity: 0.5, fontSize: "10px" }}
-                    >
-                      {seg.end}
-                    </span>
-                  </div>
-                  {seg.energyScore != null && seg.energyScore > 0 && (
-                    <div
-                      className="mt-2 h-0.5 rounded-full overflow-hidden"
-                      style={{ background: "var(--secondary)" }}
-                      title={`energy ${Math.round(seg.energyScore * 100)}%${seg.visualTag ? ` · ${seg.visualTag}` : ""}`}
-                    >
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${seg.energyScore * 100}%`,
-                          background: seg.energyScore > 0.6
-                            ? "#f59e0b"
-                            : seg.energyScore > 0.3
-                            ? "var(--primary)"
-                            : "var(--muted-foreground)",
-                          opacity: 0.7,
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
 
-                {/* Text */}
-                <div className="flex-1 px-4 py-3.5 pr-3 min-w-0">
-                  <p
-                    className="text-sm leading-relaxed"
-                    style={{ color: seg.keep ? "var(--foreground)" : "var(--muted-foreground)" }}
+            if (isDrop) {
+              return (
+                <div key={si} style={{ marginBottom: "0.5em" }}>
+                  <span
+                    style={{
+                      opacity: 0.28,
+                      textDecorationLine: "line-through",
+                      textDecorationColor: "rgba(239,68,68,0.5)",
+                      color: "#ef4444",
+                      cursor: "pointer",
+                      userSelect: "none",
+                    }}
+                    onClick={() => onToggle(si)}
+                    title={`${reasonMeta?.label ?? "dropped"} — click to restore`}
                   >
-                    <SegmentText
-                      seg={seg}
-                      segmentIndex={realIdx}
-                      onToggleWordCut={onToggleWordCut}
-                    />
-                  </p>
-                  {!seg.keep && reasonMeta && (
+                    {seg.text}
+                  </span>
+                  {reasonMeta && (
                     <span
-                      className="inline-block mt-1.5 text-xs px-2 py-0.5 rounded-full"
+                      className="ml-2 text-xs px-1.5 py-0.5 rounded"
                       style={{
                         background: reasonMeta.bg,
                         color: reasonMeta.color,
                         fontFamily: "'JetBrains Mono', monospace",
                         fontSize: "10px",
+                        opacity: 0.6,
+                        userSelect: "none",
                       }}
                     >
                       {reasonMeta.label}
                     </span>
                   )}
-                  {seg.keep && seg.wordCuts && seg.wordCuts.length > 0 && (() => {
-                    const fillerCuts   = seg.wordCuts.filter((wc) => wc.source === "filler");
-                    const manualCuts   = seg.wordCuts.filter((wc) => wc.source === "manual");
-                    const silenceCuts  = seg.wordCuts.filter((wc) => wc.source === "silence" || wc.word === "<silence>");
-                    return (
-                      <>
-                        {fillerCuts.length > 0 && (
-                          <span
-                            className="inline-block mt-1.5 text-xs px-2 py-0.5 rounded-full"
-                            style={{
-                              background: "rgba(245,158,11,0.1)",
-                              color: "#f59e0b",
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: "10px",
-                            }}
-                          >
-                            {fillerCuts.length} filler{fillerCuts.length > 1 ? "s" : ""} cut
-                          </span>
-                        )}
-                        {silenceCuts.length > 0 && (
-                          <span
-                            className="inline-block mt-1.5 ml-1 text-xs px-2 py-0.5 rounded-full"
-                            style={{
-                              background: "rgba(148,163,184,0.1)",
-                              color: "#94a3b8",
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: "10px",
-                            }}
-                          >
-                            {silenceCuts.length} silence cut
-                          </span>
-                        )}
-                        {manualCuts.length > 0 && (
-                          <span
-                            className="inline-block mt-1.5 ml-1 text-xs px-2 py-0.5 rounded-full"
-                            style={{
-                              background: "rgba(56,189,248,0.1)",
-                              color: "#38bdf8",
-                              fontFamily: "'JetBrains Mono', monospace",
-                              fontSize: "10px",
-                            }}
-                          >
-                            {manualCuts.length} manual cut{manualCuts.length > 1 ? "s" : ""}
-                          </span>
-                        )}
-                      </>
-                    );
-                  })()}
-                  {seg.keep && seg.continuityRepair && (
-                    <span
-                      className="inline-block mt-1.5 ml-1 text-xs px-2 py-0.5 rounded-full"
-                      title={seg.continuityRepair.reason}
-                      style={{
-                        background: "rgba(34,197,94,0.1)",
-                        color: "#22c55e",
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "10px",
-                      }}
-                    >
-                      continuity kept
-                    </span>
-                  )}
-                  {seg.keep && seg.transition && seg.transition.type !== "cut" && (
-                    <span
-                      className="inline-block mt-1.5 ml-1 text-xs px-2 py-0.5 rounded-full"
-                      title={
-                        seg.transition.type === "j-cut"
-                          ? `J-cut: audio starts ${seg.transition.offsetSec.toFixed(2)}s before video`
-                          : `L-cut: audio from previous lingers ${seg.transition.offsetSec.toFixed(2)}s`
-                      }
-                      style={{
-                        background: "rgba(99,102,241,0.12)",
-                        color: "var(--primary)",
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "10px",
-                        border: "1px solid rgba(99,102,241,0.2)",
-                      }}
-                    >
-                      {seg.transition.type === "j-cut" ? "J-cut" : "L-cut"}
-                    </span>
-                  )}
-                  {seg.keep && seg.duckLevel != null && seg.duckLevel < 1.0 && (
-                    <span
-                      className="inline-block mt-1.5 ml-1 text-xs px-2 py-0.5 rounded-full"
-                      title={`Audio ducked to ${Math.round(seg.duckLevel * 100)}% (B-roll)`}
-                      style={{
-                        background: "rgba(251,146,60,0.1)",
-                        color: "#fb923c",
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "10px",
-                      }}
-                    >
-                      ducked
-                    </span>
-                  )}
-                  {seg.visualTag && (
-                    <span
-                      className="inline-block mt-1.5 text-xs px-2 py-0.5 rounded-full"
-                      style={{
-                        background: "rgba(99,102,241,0.08)",
-                        color: "var(--primary)",
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "10px",
-                        opacity: 0.75,
-                        maxWidth: "100%",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={seg.visualTag}
-                    >
-                      🎥 {seg.visualTag}
-                    </span>
-                  )}
-                  {seg.jobRisk && (
-                    <span
-                      className="inline-flex items-center gap-1 mt-1.5 text-xs px-2 py-0.5 rounded-full"
-                      title={seg.jobRisk}
-                      style={{
-                        background: seg.keep ? "rgba(239,68,68,0.12)" : "rgba(239,68,68,0.06)",
-                        color: seg.keep ? "#ef4444" : "rgba(239,68,68,0.6)",
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "10px",
-                        border: seg.keep ? "1px solid rgba(239,68,68,0.25)" : "none",
-                      }}
-                    >
-                      ⚠ {seg.jobRisk}
-                    </span>
-                  )}
                 </div>
+              );
+            }
 
-                {/* Toggle */}
-                <div className="flex-shrink-0 px-3 py-3.5 flex items-center">
-                  <button
-                    onClick={() => onToggle(realIdx)}
-                    className="toggle-btn w-9 h-5 rounded-full flex items-center transition-all duration-200 relative"
-                    style={{
-                      background: seg.keep ? "var(--keep)" : "var(--secondary)",
-                      border: `1px solid ${seg.keep ? "var(--keep)" : "var(--border)"}`,
-                    }}
-                    aria-label={seg.keep ? "Mark as drop" : "Mark as keep"}
-                  >
-                    <div
-                      className="w-3.5 h-3.5 rounded-full absolute transition-all duration-200"
-                      style={{
-                        background: seg.keep ? "white" : "var(--muted-foreground)",
-                        left: seg.keep ? "calc(100% - 18px)" : "2px",
-                        top: "2px",
-                      }}
-                    />
-                  </button>
-                </div>
+            // Kept segment
+            return (
+              <div
+                key={si}
+                style={{
+                  marginBottom: "0.6em",
+                  borderLeft: hasJobRisk
+                    ? "2px solid rgba(239,68,68,0.45)"
+                    : "2px solid transparent",
+                  paddingLeft: hasJobRisk ? "10px" : "0",
+                }}
+                title={hasJobRisk ? `⚠ Job risk: ${seg.jobRisk}` : undefined}
+              >
+                {!seg.words?.length ? (
+                  <span>{seg.text}</span>
+                ) : (
+                  seg.words.map((w, wi) => {
+                    const cut      = findWordCut(seg, w, wi);
+                    const isCut    = Boolean(cut);
+                    const isManual = cut?.source === "manual";
+                    return (
+                      // Space is a separate text node BEFORE the span so that
+                      // browser selection anchored in the space does not
+                      // include the preceding word span.
+                      <Fragment key={wi}>
+                        {wi > 0 && " "}
+                        <span
+                          data-seg={String(si)}
+                          data-word={String(wi)}
+                          style={{
+                            color: isCut
+                              ? isManual
+                                ? "#38bdf8"
+                                : "#f59e0b"
+                              : "inherit",
+                            textDecorationLine: isCut ? "line-through" : "none",
+                            textDecorationColor: isCut
+                              ? isManual
+                                ? "rgba(56,189,248,0.5)"
+                                : "rgba(245,158,11,0.5)"
+                              : "transparent",
+                            opacity: isCut ? 0.6 : 1,
+                          }}
+                        >
+                          {w.word}
+                        </span>
+                      </Fragment>
+                    );
+                  })
+                )}
               </div>
             );
           })}
-
-          {renderList.length === 0 && (
-            <div className="py-12 text-center" style={{ color: "var(--muted-foreground)" }}>
-              <p className="text-sm">No segments match this filter.</p>
-            </div>
-          )}
         </div>
 
-        {/* Footer stat */}
+        {/* Footer — shows selection hint when words are selected, stats otherwise */}
         <div
           className="px-5 py-3 flex items-center justify-between border-t"
           style={{ borderColor: "var(--border)", background: "var(--card)" }}
         >
-          <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-            {keptCount} of {totalSegments} segments kept · {keptPct}% of original runtime
-          </span>
-          <span
-            className="text-xs"
-            style={{ color: "var(--keep)", fontFamily: "'JetBrains Mono', monospace" }}
-          >
+          {selPairs && selPairs.length > 0 ? (
+            <span className="text-xs" style={{ color: "#38bdf8" }}>
+              {selPairs.length} word{selPairs.length !== 1 ? "s" : ""} selected
+              <span style={{ color: "var(--muted-foreground)" }}>
+                {" "}· Backspace to cut · Esc to clear
+              </span>
+            </span>
+          ) : (
+            <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+              {keptCount} of {totalSegments} kept · {keptPct}% of runtime
+              {undoStack.length > 0 && (
+                <> · <span style={{ color: "#38bdf8" }}>Cmd+Z</span> to undo {undoStack.length} cut{undoStack.length > 1 ? "s" : ""}</>
+              )}
+            </span>
+          )}
+          <span className="text-xs" style={{ color: "var(--keep)", fontFamily: "'JetBrains Mono', monospace" }}>
             {formatSeconds(keptSeconds)} edited
           </span>
         </div>
@@ -761,81 +657,7 @@ export function TranscriptEditor({
   );
 }
 
-function findWordCut(
-  seg: Segment,
-  word: WordTimestamp,
-  wordIndex: number,
-): WordCut | undefined {
-  const id = wordCutId(seg, wordIndex);
-  return (seg.wordCuts ?? []).find(
-    (cut) =>
-      cut.id === id ||
-      (word.start >= cut.startSec && word.end <= cut.endSec),
-  );
-}
-
-function SegmentText({
-  seg,
-  segmentIndex,
-  onToggleWordCut,
-}: {
-  seg: Segment;
-  segmentIndex: number;
-  onToggleWordCut: (segmentIndex: number, wordIndex: number, range: boolean) => void;
-}) {
-  if (!seg.words?.length) {
-    return <>{seg.text}</>;
-  }
-
-  return (
-    <>
-      {seg.words.map((w, i) => {
-        const cut = findWordCut(seg, w, i);
-        const isCut = Boolean(cut);
-        const isManual = cut?.source === "manual";
-        const canToggle = !isCut || isManual;
-        const cutColor = isManual ? "#38bdf8" : "#f59e0b";
-        return (
-          <span
-            key={i}
-            role="button"
-            tabIndex={canToggle ? 0 : -1}
-            title={
-              isCut
-                ? isManual
-                  ? "manual cut — click to restore"
-                  : `${cut?.source ?? "auto"} cut`
-                : "click to cut this word"
-            }
-            onClick={(event) => {
-              event.preventDefault();
-              if (canToggle) onToggleWordCut(segmentIndex, i, event.shiftKey);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                if (canToggle) onToggleWordCut(segmentIndex, i, event.shiftKey);
-              }
-            }}
-            className={`rounded px-0.5 transition-colors ${canToggle ? "cursor-pointer" : "cursor-default"}`}
-            style={isCut ? {
-              color: cutColor,
-              textDecoration: "line-through",
-              textDecorationColor: isManual
-                ? "rgba(56,189,248,0.55)"
-                : "rgba(245,158,11,0.5)",
-              opacity: 0.75,
-            } : {
-              color: "inherit",
-            }}
-          >
-            {i > 0 ? " " : ""}{w.word}
-          </span>
-        );
-      })}
-    </>
-  );
-}
+// ── Subcomponents ──────────────────────────────────────────────────────────────
 
 function Stat({
   label,
@@ -926,11 +748,11 @@ function JudgePanel({
 
       {hasFeedback ? (
         <div className="space-y-2">
-          {fps.map((fp) => (
-            <RepairRow key={`fp-${fp.segment_index}`} item={fp} action="restore" segments={segments} onToggle={onToggle} />
+          {fps.map((fp, i) => (
+            <RepairRow key={`fp-${fp.segment_index}-${i}`} item={fp} action="restore" segments={segments} onToggle={onToggle} />
           ))}
-          {fns.map((fn) => (
-            <RepairRow key={`fn-${fn.segment_index}`} item={fn} action="drop" segments={segments} onToggle={onToggle} />
+          {fns.map((fn, i) => (
+            <RepairRow key={`fn-${fn.segment_index}-${i}`} item={fn} action="drop" segments={segments} onToggle={onToggle} />
           ))}
         </div>
       ) : (

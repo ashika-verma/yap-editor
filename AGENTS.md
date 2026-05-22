@@ -34,7 +34,7 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 ### Entry point
 
 ```
-scripts/orchestrator.py <video_path> [whisper_model] [--no-vision] [--save-fixture]
+scripts/orchestrator.py <video_path> [whisper_model] [--no-vision] [--no-segment] [--save-fixture]
 ```
 
 Outputs a single JSON edit plan to stdout. The Next.js `/api/transcribe` route calls this as a subprocess.
@@ -45,6 +45,7 @@ Outputs a single JSON edit plan to stdout. The Next.js `/api/transcribe` route c
 |------|------|------|
 | 1a | `analyze.py` | Sensor Array — motion, audio RMS, pitch, silence regions, optional Gemma visual tags |
 | 1b | `transcribe.py` | MLX-Whisper word-level timestamps (runs parallel with analyze) |
+| 1c | `segment.py` | Semantic Segmenter — merges acoustic Whisper fragments into complete thought units (skip with `--no-segment`) |
 | 2 | orchestrator (Gemini) | Director — reads sensor summary, emits per-agent config JSON |
 | 3 | orchestrator (Gemini) | Narrative Architect — keep/drop decisions per segment |
 | 4 | `surgeon.py` | Heuristic Surgeon — acoustic word boundary snapping, silence removal |
@@ -55,6 +56,7 @@ Outputs a single JSON edit plan to stdout. The Next.js `/api/transcribe` route c
 
 ### Key design decisions
 
+- **Semantic Segmenter** (`segment.py`): Runs after Whisper, before the Director. Uses the LLM to merge consecutive acoustic fragments into complete thought units (target: ≤12s per group). Chunked in batches of 40 segments to fit Gemma's context window. Duration enforcement post-processes any group the LLM over-merges. Skip with `--no-segment` for already-clean content or to save LLM calls. Measured improvement on casual vlogs: fragment rate halved (<1s: 35% → 16%), coherence +3 points.
 - **Director config**: Gemini outputs a config JSON (`{surgeon.aggressiveness, narrative.cut_target_pct, rhythmist.j_cut_threshold, ducking_enabled}`) that downstream agents consume — thresholds are LLM-driven, not hardcoded.
 - **Acoustic boundary snapping** (`surgeon.py`): Uses energy envelope (`_find_speech_end`) for cut starts and librosa onset detection with `backtrack=True` (`_find_speech_onset`) for cut ends. Replaces naive zero-crossing snap.
 - **Word cut padding**: 3ms pre, 18ms post (asymmetric — trailing consonants need room).

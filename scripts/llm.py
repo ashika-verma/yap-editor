@@ -19,8 +19,30 @@ import os
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
+_DEFAULT_LOCAL_URL = "http://127.0.0.1:1234"
+
+
+def _probe_local(base_url: str) -> bool:
+    """Return True if an OpenAI-compatible server is reachable at base_url."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base_url}/v1/models", timeout=2) as r:
+            data = json.loads(r.read())
+            return bool(data.get("data"))
+    except Exception:
+        return False
+
+
 def is_local() -> bool:
-    return bool(os.environ.get("LLM_BASE_URL", ""))
+    explicit = os.environ.get("LLM_BASE_URL", "")
+    if explicit:
+        return True
+    # Auto-probe: if LM Studio (or Ollama) is running at the default port,
+    # use it rather than falling back to rule-based heuristics.
+    if _probe_local(_DEFAULT_LOCAL_URL):
+        os.environ["LLM_BASE_URL"] = _DEFAULT_LOCAL_URL
+        return True
+    return False
 
 
 def generate(

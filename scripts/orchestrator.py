@@ -383,7 +383,7 @@ def run_narrative_architect(
     min_drops = max(1, int(cut_pct * n_segs))
 
     if not api_key and not _llm.is_local():
-        print("  No GEMINI_API_KEY — rule-based fallback", file=sys.stderr)
+        print("  No GEMINI_API_KEY and no local LLM found — rule-based fallback", file=sys.stderr)
         return _rule_based_fallback(segments)
 
     # ── Pre-pass: deterministic consecutive-duplicate removal ────────────────
@@ -1101,6 +1101,7 @@ def main() -> None:
 
     video_path    = sys.argv[1]
     no_vision     = "--no-vision" in sys.argv
+    no_segment    = "--no-segment" in sys.argv
     save_fixture  = "--save-fixture" in sys.argv
     # Positional args are everything that isn't a flag
     positional = [a for a in sys.argv[2:] if not a.startswith("--")]
@@ -1129,6 +1130,18 @@ def main() -> None:
 
         duration = analyze_result.get("duration", whisper_result["segments"][-1]["end"])
         buckets  = analyze_result.get("buckets", [])
+
+        # ── 1b. Semantic Segmenter ─────────────────────────────────────────────
+        if not no_segment and (api_key or _llm.is_local()):
+            print("▶ Semantic Segmenter: merging Whisper fragments into thought units...", file=sys.stderr)
+            try:
+                from segment import segment as _run_segmenter
+                orig_n = len(whisper_result["segments"])
+                whisper_result["segments"] = _run_segmenter(whisper_result["segments"], api_key)
+                new_n = len(whisper_result["segments"])
+                print(f"  {orig_n} Whisper → {new_n} semantic segments", file=sys.stderr)
+            except Exception as e:
+                print(f"  Segmenter failed ({e}), using raw Whisper segments", file=sys.stderr)
 
         # ── 2. Director ────────────────────────────────────────────────────────
         print("▶ Director: configuring pipeline...", file=sys.stderr)

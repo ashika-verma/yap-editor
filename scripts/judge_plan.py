@@ -22,7 +22,7 @@ def main() -> None:
     plan    = payload.get("plan") or {}
     api_key = os.environ.get("GEMINI_API_KEY", "")
 
-    result = judge_plan(plan, api_key, strict=True)
+    result = judge_plan(plan, api_key, strict=True, require_repairs=True)
     sys.stdout.write(json.dumps(result) + "\n")
 
 

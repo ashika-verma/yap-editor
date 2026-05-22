@@ -257,32 +257,52 @@ export default function Home() {
             ?.slice(rangeStart, rangeEnd + 1)
             .map((_, offset) => wordCutId(seg, rangeStart + offset)) ?? [],
         );
-        const hasAnyManualCut = existingCuts.some(
-          (cut) => cut.source === "manual" && cut.id && rangeIds.has(cut.id),
-        );
+        // A word is "covered" by a manual cut if its ID matches directly, OR if it
+        // falls inside a spanning cut (startSec/endSec envelope — handles multi-word
+        // cuts created by a range selection, which use only the first word's ID).
+        const wordIsCovered = (word: { start: number; end: number }, wordIndex: number) =>
+          existingCuts.some(
+            (cut) =>
+              cut.source === "manual" &&
+              (cut.id === wordCutId(seg, wordIndex) ||
+                (word.start >= cut.startSec && word.end <= cut.endSec)),
+          );
+        const hasAnyManualCut =
+          (seg.words ?? [])
+            .slice(rangeStart, rangeEnd + 1)
+            .some((word, offset) => wordIsCovered(word, rangeStart + offset));
         const withoutRangeManualCuts = existingCuts.filter(
-          (cut) => !(cut.source === "manual" && cut.id && rangeIds.has(cut.id)),
+          (cut) =>
+            !(
+              cut.source === "manual" &&
+              (rangeIds.has(cut.id ?? "") ||
+                // Also remove a spanning cut that fully envelops the range
+                ((seg.words?.[rangeStart]?.start ?? Infinity) >= cut.startSec &&
+                  (seg.words?.[rangeEnd]?.end ?? -Infinity) <= cut.endSec))
+            ),
         );
-        const addedManualCuts: WordCut[] = hasAnyManualCut
-          ? []
-          : (seg.words ?? [])
-              .slice(rangeStart, rangeEnd + 1)
-              .map((word, offset) => ({ word, wordIndex: rangeStart + offset }))
-              .filter(({ word, wordIndex }) => {
-                const id = wordCutId(seg, wordIndex);
-                return !existingCuts.some(
-                  (cut) =>
-                    cut.id === id ||
-                    (word.start >= cut.startSec && word.end <= cut.endSec),
-                );
-              })
-              .map(({ word, wordIndex }) => ({
-                id: wordCutId(seg, wordIndex),
-                startSec: word.start,
-                endSec: word.end,
-                word: word.word,
-                source: "manual",
-              }));
+        const rangeWords = (seg.words ?? []).slice(rangeStart, rangeEnd + 1);
+        // For multi-word ranges, create ONE spanning cut so there are no
+        // sub-threshold keep-spans (inter-word gaps) inside the removed region.
+        // For single words, keep the per-word cut format unchanged.
+        const addedManualCuts: WordCut[] =
+          hasAnyManualCut || rangeWords.length === 0
+            ? []
+            : rangeStart === rangeEnd
+              ? [{
+                  id: wordCutId(seg, rangeStart),
+                  startSec: rangeWords[0].start,
+                  endSec: rangeWords[0].end,
+                  word: rangeWords[0].word,
+                  source: "manual" as const,
+                }]
+              : [{
+                  id: wordCutId(seg, rangeStart),   // identified by first-word id
+                  startSec: rangeWords[0].start,
+                  endSec: rangeWords[rangeWords.length - 1].end,
+                  word: rangeWords.map((w) => w.word).join(" "),
+                  source: "manual" as const,
+                }];
         return {
           ...seg,
           wordCuts: [...withoutRangeManualCuts, ...addedManualCuts].sort(
@@ -294,6 +314,66 @@ export default function Home() {
       return { ...prev, segments: nextSegments };
     });
     setLastWordSelection({ segmentIndex, wordIndex });
+  };
+
+  // Called by the document editor when a selection range is committed (Backspace).
+  // Creates one spanning WordCut per segment rather than N individual cuts, so there
+  // are no sub-threshold keep-spans hiding between consecutive word-level cuts.
+  const handleCutRange = (segIdx: number, startWordIdx: number, endWordIdx: number) => {
+    setPlan((prev) => {
+      if (!prev) return prev;
+      const seg = prev.segments[segIdx];
+      if (!seg?.words) return prev;
+      const existingCuts = seg.wordCuts ?? [];
+      const rangeIds = new Set(
+        seg.words
+          .slice(startWordIdx, endWordIdx + 1)
+          .map((_, offset) => wordCutId(seg, startWordIdx + offset)),
+      );
+      const wordIsCovered = (word: { start: number; end: number }, wi: number) =>
+        existingCuts.some(
+          (cut) =>
+            cut.source === "manual" &&
+            (cut.id === wordCutId(seg, wi) ||
+              (word.start >= cut.startSec && word.end <= cut.endSec)),
+        );
+      const hasAnyManualCut = seg.words
+        .slice(startWordIdx, endWordIdx + 1)
+        .some((word, offset) => wordIsCovered(word, startWordIdx + offset));
+      const withoutRangeCuts = existingCuts.filter(
+        (cut) =>
+          !(
+            cut.source === "manual" &&
+            (rangeIds.has(cut.id ?? "") ||
+              ((seg.words![startWordIdx]?.start ?? Infinity) >= cut.startSec &&
+                (seg.words![endWordIdx]?.end ?? -Infinity) <= cut.endSec))
+          ),
+      );
+      const rangeWords = seg.words.slice(startWordIdx, endWordIdx + 1);
+      const addedCuts: WordCut[] =
+        hasAnyManualCut || rangeWords.length === 0
+          ? []
+          : startWordIdx === endWordIdx
+            ? [{
+                id: wordCutId(seg, startWordIdx),
+                startSec: rangeWords[0].start,
+                endSec: rangeWords[0].end,
+                word: rangeWords[0].word,
+                source: "manual" as const,
+              }]
+            : [{
+                id: wordCutId(seg, startWordIdx),
+                startSec: rangeWords[0].start,
+                endSec: rangeWords[rangeWords.length - 1].end,
+                word: rangeWords.map((w) => w.word).join(" "),
+                source: "manual" as const,
+              }];
+      const nextSeg = {
+        ...seg,
+        wordCuts: [...withoutRangeCuts, ...addedCuts].sort((a, b) => a.startSec - b.startSec),
+      };
+      return { ...prev, segments: prev.segments.map((s, i) => (i === segIdx ? nextSeg : s)) };
+    });
   };
 
   const handleExport = async () => {
@@ -529,6 +609,7 @@ export default function Home() {
               judgeResult={judgeResult}
               onToggle={handleToggleSegment}
               onToggleWordCut={handleToggleWordCut}
+              onCutRange={handleCutRange}
               onResetToGemini={handleResetToGemini}
               onToggleAll={handleToggleAll}
               onSensitivityChange={handleSensitivityChange}
