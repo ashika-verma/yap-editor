@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
 import { ExportPanel } from "@/components/ExportPanel";
+import { ThumbnailStudio, type ThumbnailData } from "@/components/ThumbnailStudio";
 import {
   buildCleanTranscript as buildTranscriptText,
   EditPlan,
@@ -37,6 +38,9 @@ export default function Home() {
     segmentIndex: number;
     wordIndex: number;
   } | null>(null);
+  const [thumbnailData, setThumbnailData] = useState<ThumbnailData[] | null>(null);
+  const [showThumbnailStudio, setShowThumbnailStudio] = useState(false);
+  const [isThumbnailGenerating, setIsThumbnailGenerating] = useState(false);
 
   const segments = useMemo(() => plan?.segments ?? [], [plan?.segments]);
 
@@ -376,6 +380,32 @@ export default function Home() {
     });
   };
 
+  const handleGenerateThumbnails = async () => {
+    if (!filePath || !plan) return;
+    setIsThumbnailGenerating(true);
+    try {
+      const res = await fetch("/api/thumbnail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath, plan }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Thumbnail generation failed");
+      }
+      const data: { thumbnails: ThumbnailData[] } = await res.json();
+      if (!data.thumbnails.length) {
+        throw new Error("No thumbnails generated — DDG may be rate-limiting. Try again in a moment.");
+      }
+      setThumbnailData(data.thumbnails);
+      setShowThumbnailStudio(true);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Thumbnail generation failed");
+    } finally {
+      setIsThumbnailGenerating(false);
+    }
+  };
+
   const handleExport = async () => {
     if (!filePath || !plan) return;
     setStage("exporting");
@@ -572,6 +602,13 @@ export default function Home() {
         </div>
       </header>
 
+      {showThumbnailStudio && thumbnailData && (
+        <ThumbnailStudio
+          thumbnails={thumbnailData}
+          onClose={() => setShowThumbnailStudio(false)}
+        />
+      )}
+
       {/* Main */}
       <main className="max-w-5xl mx-auto px-4 sm:px-8 py-10">
         {stage === "upload" && (
@@ -625,6 +662,8 @@ export default function Home() {
               onExport={handleExport}
               onReset={handleReset}
               onCopyTranscript={buildCleanTranscript}
+              onGenerateThumbnails={handleGenerateThumbnails}
+              isThumbnailGenerating={isThumbnailGenerating}
             />
           </div>
         )}

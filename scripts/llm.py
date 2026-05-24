@@ -61,6 +61,34 @@ def generate(
     return _gemini(prompt, schema=schema, model=model, api_key=api_key)
 
 
+def generate_vision(
+    prompt: str,
+    images: list[bytes],
+    schema: dict | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> str:
+    """
+    Generate text with image inputs. Prefers Gemini (better vision quality);
+    falls back to local LLM on rate-limit errors.
+
+    Raises on failure — callers are responsible for try/except.
+    """
+    try:
+        return _gemini_vision(prompt, images=images, schema=schema, model=model, api_key=api_key)
+    except Exception as e:
+        if _is_rate_limited(e) and _probe_local(_DEFAULT_LOCAL_URL):
+            import sys
+            print(f"[llm] Gemini rate limited — falling back to local vision", file=sys.stderr)
+            return _openai_compat_vision(prompt, images=images, schema=schema, model=model)
+        raise
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(tok in msg for tok in ("429", "quota", "rate_limit", "resource_exhausted", "exhausted"))
+
+
 # ── Gemini backend ─────────────────────────────────────────────────────────────
 
 def _gemini(
@@ -176,3 +204,94 @@ def _detect_model(base_url: str) -> str:
     except Exception:
         pass
     return "local-model"
+
+
+# ── Vision backends ────────────────────────────────────────────────────────────
+
+def _gemini_vision(
+    prompt: str,
+    images: list[bytes],
+    schema: dict | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> str:
+    import base64
+    from google import genai                  # type: ignore
+    from google.genai import types as gtypes  # type: ignore
+
+    key = api_key or os.environ.get("GEMINI_API_KEY", "")
+    client = genai.Client(api_key=key)
+
+    parts: list[dict] = []
+    for img_bytes in images:
+        b64 = base64.b64encode(img_bytes).decode()
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
+    parts.append({"text": prompt})
+
+    cfg = gtypes.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=schema if schema else None,
+    )
+    resp = client.models.generate_content(
+        model=model or DEFAULT_GEMINI_MODEL,
+        contents=[{"role": "user", "parts": parts}],
+        config=cfg,
+    )
+    return resp.text
+
+
+def _openai_compat_vision(
+    prompt: str,
+    images: list[bytes],
+    schema: dict | None = None,
+    model: str | None = None,
+) -> str:
+    import base64
+    import urllib.request, urllib.error
+
+    base_url = os.environ.get("LLM_BASE_URL", _DEFAULT_LOCAL_URL).rstrip("/")
+    effective_model = model or os.environ.get("LLM_MODEL") or _detect_model(base_url)
+    api_key = os.environ.get("LLM_API_KEY", "lm-studio")
+
+    # Build vision content array: images first, then the text prompt
+    content: list[dict] = []
+    for img_bytes in images:
+        b64 = base64.b64encode(img_bytes).decode()
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload: dict = {
+        "model": effective_model,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.3,
+    }
+    if schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": schema},
+        }
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{base_url}/v1/chat/completions",
+        data=body,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_str = e.read().decode(errors="replace")
+        raise RuntimeError(f"HTTP {e.code} from {base_url}: {body_str[:400]}") from e
+
+    msg = data["choices"][0]["message"]
+    text = msg.get("content") or ""
+    if "<think>" in text:
+        text = text.split("</think>", 1)[-1].strip()
+    return text

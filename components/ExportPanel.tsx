@@ -17,6 +17,8 @@ interface Props {
   onExport: () => void;
   onReset: () => void;
   onCopyTranscript: () => string;
+  onGenerateThumbnails: () => void;
+  isThumbnailGenerating?: boolean;
 }
 
 export function ExportPanel({
@@ -28,6 +30,8 @@ export function ExportPanel({
   onExport,
   onReset,
   onCopyTranscript,
+  onGenerateThumbnails,
+  isThumbnailGenerating = false,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const isExporting = stage === "exporting" && !exportUrl;
@@ -100,6 +104,29 @@ export function ExportPanel({
                 </svg>
               )}
               {copied ? "Copied" : "Copy transcript"}
+            </button>
+            <button
+              onClick={onGenerateThumbnails}
+              disabled={isThumbnailGenerating}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+              onMouseEnter={(e) => { if (!isThumbnailGenerating) (e.currentTarget).style.color = "var(--foreground)"; }}
+              onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
+            >
+              {isThumbnailGenerating ? (
+                <>
+                  <div className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
+                  Generating…
+                </>
+              ) : (
+                <>
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                    <rect x="1" y="1" width="11" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+                    <path d="M3.5 12h6M6.5 9v3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                  </svg>
+                  Thumbnails
+                </>
+              )}
             </button>
             <button
               onClick={onReset}
