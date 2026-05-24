@@ -282,12 +282,26 @@ FACE_BBOX_SCHEMA: dict = {
 _DEFAULT_FACE = {"face_top": 0.08, "face_bottom": 0.50, "face_left": 0.30, "face_right": 0.70}
 
 
-def _detect_face(img_bytes: bytes) -> dict:
+def _detect_face(img_bytes: bytes, cache_key: str | None = None) -> dict:
     """
     Ask vision LLM to locate the face in the image.
     Returns bbox as 0–1 fractions. Falls back to _DEFAULT_FACE on any failure.
     Uses Gemini; falls back to local Gemma on rate limit (via generate_vision).
+    Results are disk-cached by cache_key to avoid repeated LLM calls on re-renders.
     """
+    import tempfile
+    if cache_key is None:
+        import hashlib
+        cache_key = hashlib.md5(img_bytes).hexdigest()
+    cache_path = Path(tempfile.gettempdir()) / f"thumb_face_bbox_{cache_key}.json"
+    if cache_path.exists():
+        try:
+            bbox = json.loads(cache_path.read_text())
+            print("[thumbnail] face bbox (cached)", end=" ", flush=True, file=sys.stderr)
+            return bbox
+        except Exception:
+            pass
+
     prompt = (
         "This image shows a person composited on a solid or gray background. "
         "Locate the face/head region ONLY (not body, hair below chin, or background). "
@@ -300,6 +314,10 @@ def _detect_face(img_bytes: bytes) -> dict:
         bbox = json.loads(raw)
         if (bbox["face_bottom"] > bbox["face_top"] + 0.05 and
                 bbox["face_right"] > bbox["face_left"] + 0.05):
+            try:
+                cache_path.write_text(json.dumps(bbox))
+            except Exception:
+                pass
             return bbox
         print("[thumbnail] face bbox looks wrong, using defaults", file=sys.stderr)
     except Exception as e:
@@ -370,17 +388,34 @@ def compose(
     PAD_X         = 36
     BLEED         = int(W * 0.18)
     PERSON_H_FRAC = 0.97
+    MAX_PERSON_W  = int(W * 0.55)  # 704px — center-crop landscape stills to leave room for text
 
     # ── Step 1: scale cutout ───────────────────────────────────────────────────
     cutout   = None
-    person_w = int(W * 0.55)
+    person_w = MAX_PERSON_W
     if face_path and Path(face_path).exists():
         raw = _remove_bg(face_path)
         if raw is not None:
-            target_h = int(H * PERSON_H_FRAC)
+            target_h = int(H * PERSON_H_FRAC)          # always full frame height
             target_w = int(raw.width * (target_h / raw.height))
-            cutout   = raw.resize((target_w, target_h), Image.LANCZOS)
-            person_w = target_w
+            resized  = raw.resize((target_w, target_h), Image.LANCZOS)
+            if target_w > MAX_PERSON_W:
+                # Directional crop: keep the side of the cutout that faces the text zone.
+                # For "left" (person on left, text on right) → keep leftmost pixels so
+                # the RIGHT body edge (facing text) is the natural edge of the person,
+                # not the couch/background to the right.
+                # For "right" → mirror: keep rightmost pixels.
+                # For "center" → center-crop.
+                if face_side == "left":
+                    crop_x = 0
+                elif face_side == "right":
+                    crop_x = target_w - MAX_PERSON_W
+                else:
+                    crop_x = (target_w - MAX_PERSON_W) // 2
+                cutout = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, target_h))
+            else:
+                cutout = resized
+            person_w = cutout.width
 
     target_h = int(H * PERSON_H_FRAC)
     py = H - target_h
@@ -396,12 +431,19 @@ def compose(
     if face_bbox is None:
         face_bbox = _DEFAULT_FACE.copy()
         if cutout is not None:
+            import hashlib
+            # Cache key: stable face frame content + layout params — avoids re-calling
+            # the vision LLM every render when only rendering constants changed.
+            face_bytes_for_key = Path(face_path).read_bytes() if face_path else b""
+            cache_seed = face_bytes_for_key[:4096] + f"{face_side}{px}{py}".encode()
+            cache_key  = hashlib.md5(cache_seed).hexdigest()
+
             detect_bg = Image.new("RGB", (W, H), (128, 128, 128))
             detect_bg.paste(cutout.convert("RGB"), (px, py), cutout.getchannel("A"))
             buf = io.BytesIO()
             detect_bg.save(buf, format="JPEG", quality=75)
             print("[thumbnail] detecting face…", end=" ", flush=True, file=sys.stderr)
-            face_bbox = _detect_face(buf.getvalue())
+            face_bbox = _detect_face(buf.getvalue(), cache_key=cache_key)
             print(f"  top={face_bbox['face_top']:.2f} btm={face_bbox['face_bottom']:.2f}", file=sys.stderr)
 
     # ── Steps 3–4: render bg canvas + headline ───────────────────────────────────
@@ -422,22 +464,26 @@ def compose(
     canvas = Image.new("RGBA", (W, H), (*bg_rgb, 255))
     draw   = ImageDraw.Draw(canvas)
 
-    # Full frame width for all layouts — person composited on top covers the
-    # face area naturally (same effect the user likes in center thumbnails).
-    # For left/right we shift zone_cx toward the clear side so text is readable.
-    zone_x0    = PAD_X
-    zone_x1    = W - PAD_X
-    max_w_line = zone_x1 - zone_x0
+    # Text zone: anchored against the person with ~8% body overlap allowed.
+    # Person is capped at 55% width, so each side has ~45% clear zone.
+    # The 8% overlap lets the text feel flush against the body (not floating).
+    OVERLAP = 0  # text starts exactly at the person's body edge
 
     if face_side == "right":
-        # Person on right: shift text center toward the clear left zone
-        zone_cx = max(0, px) // 2
+        person_left  = max(0, px)
+        zone_x0      = PAD_X
+        zone_x1      = min(W - PAD_X, person_left + OVERLAP)
+        zone_cx      = (zone_x0 + zone_x1) // 2
     elif face_side == "left":
-        # Person on left: shift text center toward the clear right zone
         person_right = max(0, px + person_w)
-        zone_cx = (person_right + W) // 2
+        zone_x0      = max(PAD_X, person_right - OVERLAP)
+        zone_x1      = W - PAD_X
+        zone_cx      = (zone_x0 + zone_x1) // 2
     else:
+        zone_x0 = PAD_X
+        zone_x1 = W - PAD_X
         zone_cx = W // 2
+    max_w_line = zone_x1 - zone_x0
     max_h_line = (avail_h - GAP * (n_lines - 1)) // n_lines
 
     # One font size to rule them all — tightest line across the set wins
