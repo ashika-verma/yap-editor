@@ -351,10 +351,12 @@ def compose(
     badge: dict | None,
     face_side: str,    # "left" | "center" | "right" — controls person position
     out_path: str,
+    face_bbox: dict | None = None,  # pre-computed bbox; skips LLM detection when provided
 ) -> None:
     """
     Two-pass render:
       Pass 1 — composite person on neutral bg → vision LLM detects face bbox
+              (skipped when face_bbox is provided — use to cache across iterations)
       Pass 2 — render full-width headline in the clear zone → person on top
     Falls back to rule-based defaults if face detection fails.
     """
@@ -391,15 +393,16 @@ def compose(
         px = (W - person_w) // 2
 
     # ── Step 2: detect face position (person at final x/y on neutral bg) ──────
-    face_bbox = _DEFAULT_FACE.copy()
-    if cutout is not None:
-        detect_bg = Image.new("RGB", (W, H), (128, 128, 128))
-        detect_bg.paste(cutout.convert("RGB"), (px, py), cutout.getchannel("A"))
-        buf = io.BytesIO()
-        detect_bg.save(buf, format="JPEG", quality=75)
-        print("[thumbnail] detecting face…", end=" ", flush=True, file=sys.stderr)
-        face_bbox = _detect_face(buf.getvalue())
-        print(f"  top={face_bbox['face_top']:.2f} btm={face_bbox['face_bottom']:.2f}", file=sys.stderr)
+    if face_bbox is None:
+        face_bbox = _DEFAULT_FACE.copy()
+        if cutout is not None:
+            detect_bg = Image.new("RGB", (W, H), (128, 128, 128))
+            detect_bg.paste(cutout.convert("RGB"), (px, py), cutout.getchannel("A"))
+            buf = io.BytesIO()
+            detect_bg.save(buf, format="JPEG", quality=75)
+            print("[thumbnail] detecting face…", end=" ", flush=True, file=sys.stderr)
+            face_bbox = _detect_face(buf.getvalue())
+            print(f"  top={face_bbox['face_top']:.2f} btm={face_bbox['face_bottom']:.2f}", file=sys.stderr)
 
     # ── Steps 3–4: render bg canvas + headline ───────────────────────────────────
     # All layouts use the full frame height. Left/right restrict the horizontal zone
