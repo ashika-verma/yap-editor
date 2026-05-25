@@ -62,6 +62,17 @@ BG_PRESETS: dict[str, dict] = {
     "tan":     {"bg": (201, 185, 154), "headline": (26, 26, 26),   "subtext": (26, 26, 26)},
 }
 
+# ── Accent colors (one pop color per bg preset for highlight words) ───────────
+
+ACCENT_COLORS: dict[str, str] = {
+    "yellow":   "#E8538F",  # hot pink on yellow
+    "red":      "#FFD93D",  # yellow on red
+    "blue":     "#FFD93D",  # yellow on blue
+    "pink":     "#FFD93D",  # yellow on pink
+    "charcoal": "#FFFFFF",  # white accent on charcoal (yellow headline, white pop)
+    "tan":      "#C0392B",  # deep red on tan
+}
+
 # ── LLM schemas ───────────────────────────────────────────────────────────────
 
 CONCEPTS_SCHEMA: dict = {
@@ -108,7 +119,8 @@ CONCEPTS_SCHEMA: dict = {
                             },
                         ]
                     },
-                    "face_timestamp": {"type": "number"},
+                    "face_timestamp":  {"type": "number"},
+                    "highlight_word":  {"type": ["string", "null"]},
                 },
             },
         }
@@ -120,6 +132,10 @@ CONCEPTS_SCHEMA: dict = {
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     h = h.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
 
 
 def _extract_transcript(plan: dict, max_chars: int = 4000) -> str:
@@ -172,7 +188,7 @@ def _fix_concepts(concepts: list[dict], summary: str) -> list[dict]:
         for line in lines:
             line = line.strip().rstrip(".,!?…")   # strip trailing punctuation
             if is_vlog:
-                line = line.replace("BLOG", "VLOG").replace("Blog", "Vlog")
+                line = line.replace("BLOG", "VLOG").replace("Blog", "Vlog").replace("blog", "vlog")
             if len(line) > 22:
                 line = line[:22].rstrip()
             upper = line.upper()
@@ -367,260 +383,283 @@ def compose(
     subtext: str,
     caveat_aside: str | None,
     badge: dict | None,
-    face_side: str,    # "left" | "center" | "right" — controls person position
+    face_side: str,
     out_path: str,
-    face_bbox: dict | None = None,  # pre-computed bbox; skips LLM detection when provided
+    face_bbox: dict | None = None,
+    highlight_word: str | None = None,
+) -> None:
+    """Thin wrapper — delegates to compose_html() (Playwright + CSS glow)."""
+    compose_html(
+        face_path=face_path, bg_preset=bg_preset, headline_font=headline_font,
+        headline_lines=headline_lines, subtext=subtext, caveat_aside=caveat_aside,
+        badge=badge, face_side=face_side, out_path=out_path,
+        highlight_word=highlight_word,
+    )
+
+
+def compose_html(
+    face_path: str | None,
+    bg_preset: str,
+    headline_font: str,
+    headline_lines: list[str],
+    subtext: str,
+    caveat_aside: str | None,
+    badge: dict | None,
+    face_side: str,
+    out_path: str,
+    face_bbox: dict | None = None,
+    highlight_word: str | None = None,
 ) -> None:
     """
-    Two-pass render:
-      Pass 1 — composite person on neutral bg → vision LLM detects face bbox
-              (skipped when face_bbox is provided — use to cache across iterations)
-      Pass 2 — render full-width headline in the clear zone → person on top
-    Falls back to rule-based defaults if face detection fails.
+    HTML/CSS + Playwright renderer — reference-style split layout.
+
+    Layout: person owns one side (bleed off edge), text owns the other side.
+    Text block is flexbox-vertically-centred in its zone, as large as it fits.
+    For center face: text brackets top + bottom (person fills the middle).
+
+    Visual: paint-order stroke fill (outlined text like reference), no glow.
+    Accent word gets a contrasting fill colour, same stroke.
     """
-    from PIL import Image, ImageDraw, ImageFilter
+    import base64 as _b64, io as _io, html as _html, re, tempfile, os
+    from PIL import Image as _PIL, ImageDraw as _IDraw
 
     preset  = BG_PRESETS.get(bg_preset, BG_PRESETS["red"])
-    bg_rgb  = preset["bg"]
-    hl_rgb  = preset["headline"]
-    sub_rgb = preset["subtext"]
+    bg_rgb  = preset["bg"];   hl_rgb = preset["headline"];   sub_rgb = preset["subtext"]
+    acc_hex = ACCENT_COLORS.get(bg_preset, "#FFD93D")
+    bg_hex  = _rgb_to_hex(bg_rgb)
+    hl_hex  = _rgb_to_hex(hl_rgb)
+    sub_hex = _rgb_to_hex(sub_rgb)
 
-    PAD_X         = 36
-    BLEED         = int(W * 0.18)
-    PERSON_H_FRAC = 0.97
-    MAX_PERSON_W  = int(W * 0.55)  # 704px — center-crop landscape stills to leave room for text
+    PAD_X        = 36
+    BLEED        = int(W * 0.18)   # how many px the person bleeds off the frame edge
+    MAX_PERSON_W = int(W * 0.55)   # cap cutout width to 55 % so the text zone is never tiny
+    person_h     = int(H * 0.97)
 
-    # ── Step 1: scale cutout ───────────────────────────────────────────────────
-    cutout   = None
-    person_w = MAX_PERSON_W
+    # ── Person cutout (rembg + directional crop) ────────────────────────────────
+    cutout_b64 = ""
+    person_w   = MAX_PERSON_W
     if face_path and Path(face_path).exists():
         raw = _remove_bg(face_path)
         if raw is not None:
-            target_h = int(H * PERSON_H_FRAC)          # always full frame height
-            target_w = int(raw.width * (target_h / raw.height))
-            resized  = raw.resize((target_w, target_h), Image.LANCZOS)
+            target_w = int(raw.width * (person_h / raw.height))
+            resized  = raw.resize((target_w, person_h), _PIL.LANCZOS)
             if target_w > MAX_PERSON_W:
-                # Directional crop: keep the side of the cutout that faces the text zone.
-                # For "left" (person on left, text on right) → keep leftmost pixels so
-                # the RIGHT body edge (facing text) is the natural edge of the person,
-                # not the couch/background to the right.
-                # For "right" → mirror: keep rightmost pixels.
-                # For "center" → center-crop.
                 if face_side == "left":
                     crop_x = 0
                 elif face_side == "right":
                     crop_x = target_w - MAX_PERSON_W
                 else:
                     crop_x = (target_w - MAX_PERSON_W) // 2
-                cutout = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, target_h))
+                cutout = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, person_h))
             else:
                 cutout = resized
             person_w = cutout.width
+            buf = _io.BytesIO()
+            cutout.save(buf, format="PNG")
+            cutout_b64 = _b64.b64encode(buf.getvalue()).decode()
 
-    target_h = int(H * PERSON_H_FRAC)
-    py = H - target_h
-
+    # ── Person x position (pixel left edge on the 1280-wide canvas) ─────────────
     if face_side == "left":
         px = -BLEED
     elif face_side == "right":
         px = W - person_w + BLEED
     else:
         px = (W - person_w) // 2
+    person_css = f"left:{px}px;"
 
-    # ── Step 2: detect face position (person at final x/y on neutral bg) ──────
-    if face_bbox is None:
-        face_bbox = _DEFAULT_FACE.copy()
-        if cutout is not None:
-            import hashlib
-            # Cache key: stable face frame content + layout params — avoids re-calling
-            # the vision LLM every render when only rendering constants changed.
-            face_bytes_for_key = Path(face_path).read_bytes() if face_path else b""
-            cache_seed = face_bytes_for_key[:4096] + f"{face_side}{px}{py}".encode()
-            cache_key  = hashlib.md5(cache_seed).hexdigest()
+    # ── Text zone: full frame height, X anchored to the open side ────────────────
+    # Font is sized to the OPEN zone width so every hero sub-line is as large as possible.
+    # Render box extends to the frame edge on the person side (head/tail bleeds behind shoulder).
+    GUTTER   = 20
+    hl_start = 20
+    hl_end   = H - 50
 
-            detect_bg = Image.new("RGB", (W, H), (128, 128, 128))
-            detect_bg.paste(cutout.convert("RGB"), (px, py), cutout.getchannel("A"))
-            buf = io.BytesIO()
-            detect_bg.save(buf, format="JPEG", quality=75)
-            print("[thumbnail] detecting face…", end=" ", flush=True, file=sys.stderr)
-            face_bbox = _detect_face(buf.getvalue(), cache_key=cache_key)
-            print(f"  top={face_bbox['face_top']:.2f} btm={face_bbox['face_bottom']:.2f}", file=sys.stderr)
+    n_lines = max(1, len(headline_lines))
+    avail_h = hl_end - hl_start
 
-    # ── Steps 3–4: render bg canvas + headline ───────────────────────────────────
-    # All layouts use the full frame height. Left/right restrict the horizontal zone
-    # to the side opposite the person; center uses full width. A single uniform font
-    # size is computed so every line renders at the same scale (no mismatched sizes).
-    # For center face the text block is anchored so line-1 bottom touches the
-    # hairline and the last line top touches the chin — person composited on top
-    # reveals text above head and below chin, creating the "around the face" look.
-    n_lines       = max(1, len(headline_lines))
-    GAP           = 12
-    BOTTOM_MARGIN = 90  # reserved for subtext
-    hl_start      = 28
-    hl_end        = H - BOTTOM_MARGIN
-    avail_h       = hl_end - hl_start
-    lines_upper   = list(headline_lines)  # preserve LLM-chosen case
+    # Open-zone: the horizontal strip clear of the person (used for font sizing only)
+    if face_side == "left":
+        open_x0 = min(W - PAD_X, max(PAD_X, px + person_w + GUTTER))
+        open_x1 = W - PAD_X
+    elif face_side == "right":
+        open_x0 = PAD_X
+        open_x1 = max(PAD_X, min(W - PAD_X, px - GUTTER))
+    else:
+        open_x0 = PAD_X
+        open_x1 = W - PAD_X
 
-    canvas = Image.new("RGBA", (W, H), (*bg_rgb, 255))
-    draw   = ImageDraw.Draw(canvas)
+    # Render box spans frame edge-to-edge; text origin is anchored to open side by
+    # directional flex-alignment so it fills the open zone and bleeds slightly behind the person.
+    zone_x0 = PAD_X
+    zone_x1 = W - PAD_X
+    zone_w  = max(200, open_x1 - open_x0)  # size font to OPEN width
 
-    # Text zone: anchored against the person with ~8% body overlap allowed.
-    # Person is capped at 55% width, so each side has ~45% clear zone.
-    # The 8% overlap lets the text feel flush against the body (not floating).
-    OVERLAP = 0  # text starts exactly at the person's body edge
+    lines_upper = ([ln.upper() for ln in headline_lines]
+                   if headline_font == "anton" else list(headline_lines))
 
+    _dummy    = _PIL.new("RGB", (W, H))
+    _draw_tmp = _IDraw.Draw(_dummy)
+
+    # Auto-split long hero lines (>3 words) into two sub-lines so each can render big.
+    def _auto_split(text: str, max_words: int = 3) -> list[str]:
+        words = text.split()
+        if len(words) <= max_words:
+            return [text]
+        mid = (len(words) + 1) // 2
+        return [" ".join(words[:mid]), " ".join(words[mid:])]
+
+    hero_raw      = lines_upper[0]
+    hero_sublines = _auto_split(hero_raw, max_words=2)
+
+    hero_max_h = int(avail_h * 0.40)
+    _hero_f    = _fit_font_group(_draw_tmp, hero_sublines, zone_w, hero_max_h, headline_font)
+    hero_size  = int(_hero_f.size * 0.93)
+
+    support_display = ""
+    support_size    = 0
+    if n_lines >= 2:
+        support_display = " ".join(headline_lines[1:])
+        support_max_h   = int(avail_h * 0.18)
+        _sup_f          = _fit_font(_draw_tmp, support_display, zone_w, support_max_h, "subtext")
+        support_size    = min(int(_sup_f.size * 0.93), max(28, int(hero_size * 0.40)))
+
+    # ── Accent word markup ──────────────────────────────────────────────────────
+    def _markup(text: str) -> str:
+        esc = _html.escape(text)
+        if not highlight_word:
+            return esc
+        return re.sub(
+            re.escape(_html.escape(highlight_word)),
+            lambda m: f'<span class="hw">{m.group()}</span>',
+            esc, count=1, flags=re.IGNORECASE,
+        )
+
+    # ── Layout: full-width flex column, vertically centred in body zone ──────────
+    # z-index:1 keeps text behind the person (z-index:2) — classic behind-shoulder look.
+    # Directional alignment anchors readable text on the open side:
+    #   face_side=right → text LEFT-aligned (left words readable, right bleeds behind person)
+    #   face_side=left  → text RIGHT-aligned (right words readable, left bleeds behind person)
     if face_side == "right":
-        person_left  = max(0, px)
-        zone_x0      = PAD_X
-        zone_x1      = min(W - PAD_X, person_left + OVERLAP)
-        zone_cx      = (zone_x0 + zone_x1) // 2
+        txt_align = "left"
+        flex_align = "flex-start"
     elif face_side == "left":
-        person_right = max(0, px + person_w)
-        zone_x0      = max(PAD_X, person_right - OVERLAP)
-        zone_x1      = W - PAD_X
-        zone_cx      = (zone_x0 + zone_x1) // 2
+        txt_align = "right"
+        flex_align = "flex-end"
     else:
-        zone_x0 = PAD_X
-        zone_x1 = W - PAD_X
-        zone_cx = W // 2
-    max_w_line = zone_x1 - zone_x0
-    max_h_line = (avail_h - GAP * (n_lines - 1)) // n_lines
+        txt_align = "center"
+        flex_align = "center"
 
-    # One font size to rule them all — tightest line across the set wins
-    font = _fit_font_group(draw, lines_upper, max_w_line, max_h_line, headline_font)
-    rl   = [(ln, draw.textbbox((0, 0), ln, font=font)) for ln in lines_upper]
-    line_heights = [bb[3] - bb[1] for _, bb in rl]
-    total_h = sum(line_heights) + GAP * (n_lines - 1)
+    # Hero renders as one div per sub-line (all same font size via hero_size CSS)
+    hero_divs = "".join(
+        f'<div class="hl" style="text-align:{txt_align};width:100%;">{_markup(sl)}</div>'
+        for sl in hero_sublines
+    )
+    sup_inner = (f'<div class="sup" style="text-align:{txt_align};width:100%;">'
+                 f'{_html.escape(support_display)}</div>'
+                 if support_size and support_display else "")
 
-    if face_side == "center" and n_lines >= 2:
-        # Anchor: first line bottom → hairline, last line top → chin.
-        # If the font is larger than the above zone the line starts at hl_start
-        # and overlaps the face area (person on top covers it — that's the look).
-        face_top_px = int(face_bbox["face_top"]    * H)
-        face_btm_px = int(face_bbox["face_bottom"] * H)
+    items_html = (
+        f'<div style="position:absolute;'
+        f'top:{hl_start}px;bottom:{H - hl_end}px;'
+        f'left:{zone_x0}px;right:{W - zone_x1}px;'
+        f'display:flex;flex-direction:column;justify-content:center;align-items:{flex_align};'
+        f'gap:6px;z-index:1;">'
+        f'{hero_divs}'
+        f'{sup_inner}'
+        f'</div>\n'
+    )
 
-        y_first = max(hl_start, face_top_px - 8 - line_heights[0])
-        y_last  = min(hl_end - line_heights[-1], face_btm_px + 8)
+    # ── Extras ─────────────────────────────────────────────────────────────────
+    person_tag  = (f'<img class="person" style="{person_css}"'
+                   f' src="data:image/png;base64,{cutout_b64}">'
+                   if cutout_b64 else "")
+    subtext_tag = (f'<div class="sub">{_html.escape(subtext)}</div>'
+                   if subtext else "")
+    caveat_tag  = (f'<div class="cav">{_html.escape(caveat_aside.lower())}</div>'
+                   if caveat_aside else "")
 
-        if n_lines == 2:
-            y_positions = [y_first, y_last]
-        else:  # 3
-            mid_h  = line_heights[1]
-            y_mid  = max(y_first + line_heights[0] + GAP,
-                         min(y_last - mid_h - GAP,
-                             (y_first + line_heights[0] + y_last) // 2 - mid_h // 2))
-            y_positions = [y_first, y_mid, y_last]
-    else:
-        # Left / right / single-line center: center the block in the zone
-        y0 = hl_start + (avail_h - total_h) // 2
-        y_positions = []
-        cur = y0
-        for h in line_heights:
-            y_positions.append(cur)
-            cur += h + GAP
-
-    for (ln, bb), y_top in zip(rl, y_positions):
-        word_w = bb[2] - bb[0]
-        dx     = zone_cx - word_w // 2 - bb[0]
-        dx     = max(zone_x0 - bb[0], min(zone_x1 - bb[2], dx))
-        draw.text((dx, y_top - bb[1]), ln, font=font, fill=hl_rgb)
-
-
-    # ── Step 5: composite person on top of headline ────────────────────────────
-    if cutout is not None:
-        shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        shadow = Image.new("RGBA", cutout.size, (0, 0, 0, 110))
-        shadow.putalpha(cutout.getchannel("A"))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=18))
-        shadow_layer.paste(shadow, (px + 10, py + 10), shadow)
-        canvas = Image.alpha_composite(canvas, shadow_layer)
-        canvas.paste(cutout, (px, py), cutout)
-        draw = ImageDraw.Draw(canvas)
-
-    # ── Step 6: subtext — bottom strip ────────────────────────────────────────
-    if subtext:
-        sm_size  = 32
-        sm_font  = _load_font("subtext", sm_size)
-        SM_MAX_W = W - PAD_X * 2
-
-        words_sm = subtext.split()
-        sm_lines: list[str] = []
-        cur = ""
-        for ww in words_sm:
-            test = (cur + " " + ww).strip()
-            if draw.textlength(test, font=sm_font) <= SM_MAX_W:
-                cur = test
-            else:
-                if cur:
-                    sm_lines.append(cur)
-                cur = ww
-        if cur:
-            sm_lines.append(cur)
-
-        LINE_H_SM  = sm_size + 6
-        total_sm_h = len(sm_lines) * LINE_H_SM
-        ty = H - 20 - total_sm_h
-        for sl in sm_lines:
-            bb_sm  = draw.textbbox((0, 0), sl, font=sm_font)
-            draw.text(
-                (PAD_X - bb_sm[0], ty - bb_sm[1]), sl,
-                font=sm_font, fill=sub_rgb,
-                stroke_width=2, stroke_fill=bg_rgb,
-            )
-            ty += LINE_H_SM
-
-    # ── Step 7: caveat aside ───────────────────────────────────────────────────
-    if caveat_aside:
-        cv_font = _load_font("caveat", 44)
-        aside   = caveat_aside.lower()
-        while True:
-            bb_cv = draw.textbbox((0, 0), aside, font=cv_font)
-            if (bb_cv[2] - bb_cv[0]) <= W - PAD_X * 2 or len(aside) < 5:
-                break
-            aside = aside.rsplit(" ", 1)[0]
-        bb_cv = draw.textbbox((0, 0), aside, font=cv_font)
-        cv_x  = W - PAD_X - (bb_cv[2] - bb_cv[0]) - bb_cv[0]
-        cv_x  = max(PAD_X, cv_x)
-        cv_y  = H - 90 - (bb_cv[3] - bb_cv[1])
-        draw.text(
-            (cv_x, cv_y - bb_cv[1]), aside,
-            font=cv_font, fill=sub_rgb,
-            stroke_width=2, stroke_fill=bg_rgb,
-        )
-
-    # ── Step 8: badge ──────────────────────────────────────────────────────────
+    badge_tag = ""
     if badge and badge.get("text"):
-        badge_text = badge["text"].upper()
-        # Always pin badge to person side so it never overlaps the text zone
-        if face_side == "right":
-            pos = "top-right"
-        elif face_side == "left":
-            pos = "top-left"
-        else:
-            # Center face: text occupies top+bottom; push badge to a bottom corner
-            raw_pos = badge.get("position", "top-right")
-            pos = "bottom-" + raw_pos.split("-")[1] if raw_pos.startswith("top-") else raw_pos
-        b_font     = _load_font("anton", 20)
-        bb_b       = draw.textbbox((0, 0), badge_text, font=b_font)
-        b_w    = bb_b[2] - bb_b[0] + 20
-        b_h    = bb_b[3] - bb_b[1] + 10
-        MARGIN = 18
-        if pos == "top-left":
-            bx, by = MARGIN, MARGIN
-        elif pos == "top-right":
-            bx, by = W - MARGIN - b_w, MARGIN
-        elif pos == "bottom-left":
-            bx, by = MARGIN, H - MARGIN - b_h
-        else:
-            bx, by = W - MARGIN - b_w, H - MARGIN - b_h
-
-        draw.rectangle([bx, by, bx + b_w, by + b_h], fill=hl_rgb)
-        draw.text(
-            (bx + 10 - bb_b[0], by + 5 - bb_b[1]),
-            badge_text, font=b_font, fill=bg_rgb,
+        bpos_map = {
+            "top-left":     "top:18px;left:18px;",
+            "top-right":    "top:18px;right:18px;",
+            "bottom-left":  "bottom:70px;left:18px;",
+            "bottom-right": "bottom:70px;right:18px;",
+        }
+        bpos = bpos_map.get(badge.get("position", "top-right"), "top:18px;right:18px;")
+        badge_tag = (
+            f'<div class="bdg" style="{bpos}background:{hl_hex};color:{bg_hex};">'
+            f'{_html.escape(badge["text"].upper())}</div>'
         )
 
-    canvas.convert("RGB").save(out_path, quality=93)
+    # ── Font URIs (local TTF files — fully offline) ─────────────────────────────
+    fd          = Path(__file__).parent / "fonts"
+    anton_uri   = (fd / "Anton-Regular.ttf").as_uri()
+    fredoka_uri = (fd / "FredokaOne-Regular.ttf").as_uri()
+    caveat_uri  = (fd / "Caveat-Regular.ttf").as_uri()
+    dmsans_p    = fd / "DMSans-Medium.ttf"
+    dmsans_face = (f"@font-face{{font-family:'DMSans';src:url('{dmsans_p.as_uri()}');}}"
+                   if dmsans_p.exists() else "")
+    sub_ff = "'DMSans',sans-serif" if dmsans_p.exists() else "'Arial',sans-serif"
+    hl_ff  = "'Anton'" if headline_font == "anton" else "'FredokaOne'"
+
+    # ── HTML document ──────────────────────────────────────────────────────────
+    doc = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+@font-face{{font-family:'Anton';src:url('{anton_uri}');font-display:block;}}
+@font-face{{font-family:'FredokaOne';src:url('{fredoka_uri}');font-display:block;}}
+@font-face{{font-family:'Caveat';src:url('{caveat_uri}');font-display:block;}}
+{dmsans_face}
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{width:{W}px;height:{H}px;overflow:hidden;position:relative;background:{bg_hex};}}
+.hl{{
+  font-family:{hl_ff},sans-serif;
+  font-size:{hero_size}px;
+  line-height:1.02;
+  color:{hl_hex};
+  text-align:center;
+  white-space:nowrap;
+}}
+.hw{{color:{acc_hex};}}
+.sup{{
+  font-family:{sub_ff};
+  font-size:{support_size}px;
+  font-style:italic;
+  font-weight:600;
+  line-height:1.15;
+  color:{hl_hex};
+  text-align:center;
+  white-space:nowrap;
+  opacity:0.85;
+}}
+.person{{
+  position:absolute;bottom:0;height:{person_h}px;width:auto;z-index:2;
+  filter:drop-shadow(2px 4px 10px rgba(0,0,0,0.35));
+}}
+.sub{{display:none;}}
+.cav{{display:none;}}
+.bdg{{display:none;}}
+</style></head>
+<body>
+{items_html}{person_tag}
+{subtext_tag}{caveat_tag}{badge_tag}
+</body></html>"""
+
+    # ── Playwright render ──────────────────────────────────────────────────────
+    tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8")
+    tmp.write(doc);  tmp.close()
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page    = browser.new_page(viewport={"width": W, "height": H})
+            page.goto(f"file://{tmp.name}", wait_until="load")
+            page.evaluate("() => document.fonts.ready")
+            page.screenshot(path=out_path, type="jpeg", quality=93,
+                           clip={"x": 0, "y": 0, "width": W, "height": H})
+            browser.close()
+    finally:
+        os.unlink(tmp.name)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

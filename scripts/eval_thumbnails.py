@@ -281,6 +281,7 @@ def render_concepts(
                 badge=concept.get("badge"),
                 face_side=concept.get("face_side", "right"),
                 out_path=str(out_path),
+                highlight_word=concept.get("highlight_word"),
             )
             paths.append(out_path)
         except Exception as e:
@@ -617,6 +618,7 @@ def run_evals(
                             badge=refined_concepts[i].get("badge"),
                             face_side=refined_concepts[i].get("face_side", "right"),
                             out_path=str(out_path),
+                            highlight_word=refined_concepts[i].get("highlight_word"),
                         )
                         refined_rendered[i] = out_path
                     except Exception as e:
