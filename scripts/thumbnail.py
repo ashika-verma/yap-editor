@@ -387,14 +387,178 @@ def compose(
     out_path: str,
     face_bbox: dict | None = None,
     highlight_word: str | None = None,
+    layout: str = "gap",        # "gap" = face-in-gap | "split" = side-split
 ) -> None:
-    """Thin wrapper — delegates to compose_html() (Playwright + CSS glow)."""
-    compose_html(
+    """Dispatch to the requested layout renderer."""
+    fn = compose_split if layout == "split" else compose_html
+    fn(
         face_path=face_path, bg_preset=bg_preset, headline_font=headline_font,
         headline_lines=headline_lines, subtext=subtext, caveat_aside=caveat_aside,
         badge=badge, face_side=face_side, out_path=out_path,
         highlight_word=highlight_word,
     )
+
+
+def compose_split(
+    face_path: str | None,
+    bg_preset: str,
+    headline_font: str,
+    headline_lines: list[str],
+    subtext: str,
+    caveat_aside: str | None,
+    badge: dict | None,
+    face_side: str,
+    out_path: str,
+    face_bbox: dict | None = None,
+    highlight_word: str | None = None,
+) -> None:
+    """
+    HTML/CSS split layout — person bleeds off one edge, text owns the opposite zone.
+    Hero auto-split into ≤2-word sub-lines so each line is as large as possible.
+    Directional flex alignment anchors text to the open side.
+    """
+    import base64 as _b64, io as _io, html as _html, re, tempfile, os
+    from PIL import Image as _PIL, ImageDraw as _IDraw
+
+    preset  = BG_PRESETS.get(bg_preset, BG_PRESETS["red"])
+    bg_rgb  = preset["bg"];   hl_rgb = preset["headline"]
+    acc_hex = ACCENT_COLORS.get(bg_preset, "#FFD93D")
+    bg_hex  = _rgb_to_hex(bg_rgb);  hl_hex = _rgb_to_hex(hl_rgb)
+
+    PAD_X        = 36
+    BLEED        = int(W * 0.18)
+    MAX_PERSON_W = int(W * 0.55)
+    person_h     = int(H * 0.97)
+
+    cutout_b64 = ""
+    person_w   = MAX_PERSON_W
+    if face_path and Path(face_path).exists():
+        raw = _remove_bg(face_path)
+        if raw is not None:
+            target_w = int(raw.width * (person_h / raw.height))
+            resized  = raw.resize((target_w, person_h), _PIL.LANCZOS)
+            if target_w > MAX_PERSON_W:
+                if face_side == "left":    crop_x = 0
+                elif face_side == "right": crop_x = target_w - MAX_PERSON_W
+                else:                      crop_x = (target_w - MAX_PERSON_W) // 2
+                cutout = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, person_h))
+            else:
+                cutout = resized
+            person_w = cutout.width
+            buf = _io.BytesIO();  cutout.save(buf, format="PNG")
+            cutout_b64 = _b64.b64encode(buf.getvalue()).decode()
+
+    if face_side == "left":    px = -BLEED
+    elif face_side == "right": px = W - person_w + BLEED
+    else:                      px = (W - person_w) // 2
+
+    GUTTER   = 20
+    hl_start = 20
+    hl_end   = H - 50
+    avail_h  = hl_end - hl_start
+
+    if face_side == "left":
+        open_x0 = min(W - PAD_X, max(PAD_X, px + person_w + GUTTER))
+        open_x1 = W - PAD_X
+    elif face_side == "right":
+        open_x0 = PAD_X
+        open_x1 = max(PAD_X, min(W - PAD_X, px - GUTTER))
+    else:
+        open_x0 = PAD_X;  open_x1 = W - PAD_X
+
+    zone_x0 = PAD_X;  zone_x1 = W - PAD_X
+    zone_w  = max(200, open_x1 - open_x0)
+
+    n_lines     = max(1, len(headline_lines))
+    lines_upper = ([ln.upper() for ln in headline_lines]
+                   if headline_font == "anton" else list(headline_lines))
+    _dummy    = _PIL.new("RGB", (W, H));  _draw_tmp = _IDraw.Draw(_dummy)
+
+    def _auto_split(text: str, max_words: int = 2) -> list[str]:
+        words = text.split()
+        if len(words) <= max_words: return [text]
+        mid = (len(words) + 1) // 2
+        return [" ".join(words[:mid]), " ".join(words[mid:])]
+
+    hero_raw      = lines_upper[0]
+    hero_sublines = _auto_split(hero_raw)
+    _hero_f       = _fit_font_group(_draw_tmp, hero_sublines, zone_w, int(avail_h * 0.40), headline_font)
+    hero_size     = int(_hero_f.size * 0.93)
+
+    support_display = "";  support_size = 0
+    if n_lines >= 2:
+        support_display = " ".join(headline_lines[1:])
+        _sup_f       = _fit_font(_draw_tmp, support_display, zone_w, int(avail_h * 0.18), "subtext")
+        support_size = min(int(_sup_f.size * 0.93), max(28, int(hero_size * 0.40)))
+
+    def _markup(text: str) -> str:
+        esc = _html.escape(text)
+        if not highlight_word: return esc
+        return re.sub(re.escape(_html.escape(highlight_word)),
+                      lambda m: f'<span class="hw">{m.group()}</span>',
+                      esc, count=1, flags=re.IGNORECASE)
+
+    if face_side == "right":    txt_align = "left";   flex_align = "flex-start"
+    elif face_side == "left":   txt_align = "right";  flex_align = "flex-end"
+    else:                       txt_align = "center";  flex_align = "center"
+
+    hero_divs = "".join(
+        f'<div class="hl" style="text-align:{txt_align};width:100%;">{_markup(sl)}</div>'
+        for sl in hero_sublines)
+    sup_inner = (f'<div class="sup" style="text-align:{txt_align};width:100%;">'
+                 f'{_html.escape(support_display)}</div>'
+                 if support_size and support_display else "")
+    items_html = (
+        f'<div style="position:absolute;top:{hl_start}px;bottom:{H-hl_end}px;'
+        f'left:{zone_x0}px;right:{W-zone_x1}px;'
+        f'display:flex;flex-direction:column;justify-content:center;align-items:{flex_align};'
+        f'gap:6px;z-index:1;">{hero_divs}{sup_inner}</div>\n')
+
+    person_tag = (f'<img class="person" style="left:{px}px;" src="data:image/png;base64,{cutout_b64}">'
+                  if cutout_b64 else "")
+
+    fd = Path(__file__).parent / "fonts"
+    anton_uri   = (fd / "Anton-Regular.ttf").as_uri()
+    fredoka_uri = (fd / "FredokaOne-Regular.ttf").as_uri()
+    caveat_uri  = (fd / "Caveat-Regular.ttf").as_uri()
+    dmsans_p    = fd / "DMSans-Medium.ttf"
+    dmsans_face = (f"@font-face{{font-family:'DMSans';src:url('{dmsans_p.as_uri()}');}}"
+                   if dmsans_p.exists() else "")
+    sub_ff = "'DMSans',sans-serif" if dmsans_p.exists() else "'Arial',sans-serif"
+    hl_ff  = "'Anton'" if headline_font == "anton" else "'FredokaOne'"
+
+    doc = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+@font-face{{font-family:'Anton';src:url('{anton_uri}');font-display:block;}}
+@font-face{{font-family:'FredokaOne';src:url('{fredoka_uri}');font-display:block;}}
+{dmsans_face}
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{width:{W}px;height:{H}px;overflow:hidden;position:relative;background:{bg_hex};}}
+.hl{{font-family:{hl_ff},sans-serif;font-size:{hero_size}px;line-height:1.02;
+     color:{hl_hex};white-space:nowrap;}}
+.hw{{color:{acc_hex};}}
+.sup{{font-family:{sub_ff};font-size:{support_size}px;font-style:italic;font-weight:600;
+      line-height:1.15;color:{hl_hex};white-space:nowrap;opacity:0.85;}}
+.person{{position:absolute;bottom:0;height:{person_h}px;width:auto;z-index:2;
+         filter:drop-shadow(2px 4px 10px rgba(0,0,0,0.35));}}
+</style></head><body>
+{items_html}{person_tag}
+</body></html>"""
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8")
+    tmp.write(doc);  tmp.close()
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page    = browser.new_page(viewport={"width": W, "height": H})
+            page.goto(f"file://{tmp.name}", wait_until="load")
+            page.evaluate("() => document.fonts.ready")
+            page.screenshot(path=out_path, type="jpeg", quality=93,
+                            clip={"x": 0, "y": 0, "width": W, "height": H})
+            browser.close()
+    finally:
+        os.unlink(tmp.name)
 
 
 def compose_html(
@@ -431,97 +595,105 @@ def compose_html(
     sub_hex = _rgb_to_hex(sub_rgb)
 
     PAD_X        = 36
-    BLEED        = int(W * 0.18)   # how many px the person bleeds off the frame edge
-    MAX_PERSON_W = int(W * 0.55)   # cap cutout width to 55 % so the text zone is never tiny
-    person_h     = int(H * 0.97)
+    MAX_PERSON_W = int(W * 0.46)   # narrower so side-text is readable behind body
+    person_h     = int(H * 1.05)   # taller so feet go off-screen naturally
 
-    # ── Person cutout (rembg + directional crop) ────────────────────────────────
-    cutout_b64 = ""
-    person_w   = MAX_PERSON_W
+    # ── Person cutout (rembg + center crop) ────────────────────────────────────
+    cutout_b64  = ""
+    cutout_pil  = None
+    person_w    = MAX_PERSON_W
     if face_path and Path(face_path).exists():
         raw = _remove_bg(face_path)
         if raw is not None:
             target_w = int(raw.width * (person_h / raw.height))
             resized  = raw.resize((target_w, person_h), _PIL.LANCZOS)
             if target_w > MAX_PERSON_W:
-                if face_side == "left":
-                    crop_x = 0
-                elif face_side == "right":
-                    crop_x = target_w - MAX_PERSON_W
-                else:
-                    crop_x = (target_w - MAX_PERSON_W) // 2
-                cutout = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, person_h))
+                crop_x = (target_w - MAX_PERSON_W) // 2   # center crop for face-in-gap
+                cutout_pil = resized.crop((crop_x, 0, crop_x + MAX_PERSON_W, person_h))
             else:
-                cutout = resized
-            person_w = cutout.width
+                cutout_pil = resized
+            person_w = cutout_pil.width
             buf = _io.BytesIO()
-            cutout.save(buf, format="PNG")
+            cutout_pil.save(buf, format="PNG")
             cutout_b64 = _b64.b64encode(buf.getvalue()).decode()
 
-    # ── Person x position (pixel left edge on the 1280-wide canvas) ─────────────
-    if face_side == "left":
-        px = -BLEED
-    elif face_side == "right":
-        px = W - person_w + BLEED
-    else:
-        px = (W - person_w) // 2
-    person_css = f"left:{px}px;"
+    # ── Face Y bounds via numpy alpha scan (no LLM) ─────────────────────────────
+    # Scan the rembg alpha channel to find the top of the hair (head_top_row)
+    # and estimate the chin (28% of visible body height below the hair).
+    # All rows are in CUTOUT pixel space; convert to canvas space below.
+    import numpy as _np
 
-    # ── Text zone: full frame height, X anchored to the open side ────────────────
-    # Font is sized to the OPEN zone width so every hero sub-line is as large as possible.
-    # Render box extends to the frame edge on the person side (head/tail bleeds behind shoulder).
-    GUTTER   = 20
-    hl_start = 20
-    hl_end   = H - 50
+    head_top_row = 0
+    chin_row     = int(person_h * 0.30)   # fallback
 
-    n_lines = max(1, len(headline_lines))
-    avail_h = hl_end - hl_start
+    if cutout_pil is not None:
+        try:
+            _arr   = _np.array(cutout_pil)
+            _alpha = _arr[:, :, 3]
+            _rows  = _np.where(_alpha.max(axis=1) > 30)[0]
+            if len(_rows) > 20:
+                head_top_row = int(_rows[0])
+                body_btm_row = int(_rows[-1])
+                chin_row     = head_top_row + int((body_btm_row - head_top_row) * 0.38)
+        except Exception:
+            pass
 
-    # Open-zone: the horizontal strip clear of the person (used for font sizing only)
-    if face_side == "left":
-        open_x0 = min(W - PAD_X, max(PAD_X, px + person_w + GUTTER))
-        open_x1 = W - PAD_X
-    elif face_side == "right":
-        open_x0 = PAD_X
-        open_x1 = max(PAD_X, min(W - PAD_X, px - GUTTER))
-    else:
-        open_x0 = PAD_X
-        open_x1 = W - PAD_X
+    # Shift person DOWN so the top of the hair lands at TARGET_HEAD_Y.
+    # Optimal value balances top_avail (TARGET_HEAD_Y - GAP - TOP_MARGIN) with
+    # bot_avail ((H - BOT_MARGIN) - chin_canvas - GAP). Given chin ≈ 38% of 756px
+    # below hair top, the equal-zone optimum is ≈ 28% of frame height.
+    TARGET_HEAD_Y = int(H * 0.28)          # hair top at 28% from frame top
+    person_top    = max(0, TARGET_HEAD_Y - head_top_row)
 
-    # Render box spans frame edge-to-edge; text origin is anchored to open side by
-    # directional flex-alignment so it fills the open zone and bleeds slightly behind the person.
-    zone_x0 = PAD_X
-    zone_x1 = W - PAD_X
-    zone_w  = max(200, open_x1 - open_x0)  # size font to OPEN width
+    # Canvas-space face coordinates
+    face_top_canvas = person_top + head_top_row      # top of hair
+    face_btm_canvas = person_top + chin_row           # bottom of chin
 
+    # ── Gap geometry ─────────────────────────────────────────────────────────────
+    GAP          = 28    # breathing room between text and face edge (pixels)
+    TOP_MARGIN   = 14
+    BOT_MARGIN   = 48
+
+    line1_btm = face_top_canvas - GAP            # bottom edge of above-head text
+    line2_top = face_btm_canvas + GAP            # top edge of below-chin text
+
+    line1_btm = max(TOP_MARGIN + 30, line1_btm)
+    line2_top = min(H - BOT_MARGIN - 30, line2_top)
+
+    # ── Font sizing — same size for both gap lines ───────────────────────────────
+    n_lines     = max(1, len(headline_lines))
+    zone_w      = W - 2 * PAD_X             # full frame width for text
     lines_upper = ([ln.upper() for ln in headline_lines]
                    if headline_font == "anton" else list(headline_lines))
 
     _dummy    = _PIL.new("RGB", (W, H))
     _draw_tmp = _IDraw.Draw(_dummy)
 
-    # Auto-split long hero lines (>3 words) into two sub-lines so each can render big.
-    def _auto_split(text: str, max_words: int = 3) -> list[str]:
-        words = text.split()
-        if len(words) <= max_words:
-            return [text]
-        mid = (len(words) + 1) // 2
-        return [" ".join(words[:mid]), " ".join(words[mid:])]
+    # Split hero: above-face gets the ceiling half so single-word phrases
+    # (e.g. "I") don't end up alone above — at least 2 words go above when possible.
+    hero_raw  = lines_upper[0]
+    _words    = hero_raw.split()
+    _mid      = max(1, (len(_words) + 1) // 2)   # round UP → above gets ≥ half
+    line_above = " ".join(_words[:_mid])
+    line_below = " ".join(_words[_mid:]) if len(_words) > 1 else hero_raw
 
-    hero_raw      = lines_upper[0]
-    hero_sublines = _auto_split(hero_raw, max_words=2)
+    top_avail = max(20, line1_btm - TOP_MARGIN)
+    bot_avail = max(20, (H - BOT_MARGIN) - line2_top)
+    avail_h   = min(top_avail, bot_avail)
 
-    hero_max_h = int(avail_h * 0.40)
-    _hero_f    = _fit_font_group(_draw_tmp, hero_sublines, zone_w, hero_max_h, headline_font)
-    hero_size  = int(_hero_f.size * 0.93)
+    _hero_f   = _fit_font_group(_draw_tmp, [line_above, line_below], zone_w, avail_h, headline_font)
+    hero_size = int(_hero_f.size * 0.93)
 
+    # Support text drops below line_below; size whatever height remains
     support_display = ""
     support_size    = 0
     if n_lines >= 2:
         support_display = " ".join(headline_lines[1:])
-        support_max_h   = int(avail_h * 0.18)
-        _sup_f          = _fit_font(_draw_tmp, support_display, zone_w, support_max_h, "subtext")
-        support_size    = min(int(_sup_f.size * 0.93), max(28, int(hero_size * 0.40)))
+        sup_top         = line2_top + int(hero_size * 1.05) + 8
+        sup_avail_h     = max(10, (H - BOT_MARGIN) - sup_top)
+        if sup_avail_h > 18:
+            _sup_f       = _fit_font(_draw_tmp, support_display, zone_w, sup_avail_h, "subtext")
+            support_size = min(int(_sup_f.size * 0.93), max(22, int(hero_size * 0.32)))
 
     # ── Accent word markup ──────────────────────────────────────────────────────
     def _markup(text: str) -> str:
@@ -534,43 +706,32 @@ def compose_html(
             esc, count=1, flags=re.IGNORECASE,
         )
 
-    # ── Layout: full-width flex column, vertically centred in body zone ──────────
-    # z-index:1 keeps text behind the person (z-index:2) — classic behind-shoulder look.
-    # Directional alignment anchors readable text on the open side:
-    #   face_side=right → text LEFT-aligned (left words readable, right bleeds behind person)
-    #   face_side=left  → text RIGHT-aligned (right words readable, left bleeds behind person)
-    if face_side == "right":
-        txt_align = "left"
-        flex_align = "flex-start"
-    elif face_side == "left":
-        txt_align = "right"
-        flex_align = "flex-end"
-    else:
-        txt_align = "center"
-        flex_align = "center"
-
-    # Hero renders as one div per sub-line (all same font size via hero_size CSS)
-    hero_divs = "".join(
-        f'<div class="hl" style="text-align:{txt_align};width:100%;">{_markup(sl)}</div>'
-        for sl in hero_sublines
-    )
-    sup_inner = (f'<div class="sup" style="text-align:{txt_align};width:100%;">'
-                 f'{_html.escape(support_display)}</div>'
-                 if support_size and support_display else "")
+    # ── Layout: line_above bottom-pinned to gap top, line_below top-pinned to gap bottom
+    # Both text layers sit at z-index:1 so the person (z-index:2) composites on top —
+    # the face/hair clips into the whitespace between the two lines.
+    sup_top = line2_top + int(hero_size * 1.05) + 8
+    sup_html = ""
+    if support_size and support_display and sup_top < H - BOT_MARGIN:
+        sup_html = (
+            f'<div class="sup" style="position:absolute;'
+            f'top:{sup_top}px;left:{PAD_X}px;right:{PAD_X}px;">'
+            f'{_html.escape(support_display)}</div>'
+        )
 
     items_html = (
-        f'<div style="position:absolute;'
-        f'top:{hl_start}px;bottom:{H - hl_end}px;'
-        f'left:{zone_x0}px;right:{W - zone_x1}px;'
-        f'display:flex;flex-direction:column;justify-content:center;align-items:{flex_align};'
-        f'gap:6px;z-index:1;">'
-        f'{hero_divs}'
-        f'{sup_inner}'
-        f'</div>\n'
+        f'<div class="hl" style="position:absolute;'
+        f'bottom:{H - line1_btm}px;left:{PAD_X}px;right:{PAD_X}px;">'
+        f'{_markup(line_above)}</div>\n'
+        f'<div class="hl" style="position:absolute;'
+        f'top:{line2_top}px;left:{PAD_X}px;right:{PAD_X}px;">'
+        f'{_markup(line_below)}</div>\n'
+        f'{sup_html}\n'
     )
 
     # ── Extras ─────────────────────────────────────────────────────────────────
-    person_tag  = (f'<img class="person" style="{person_css}"'
+    px_center   = (W - person_w) // 2
+    person_tag  = (f'<img class="person"'
+                   f' style="left:{px_center}px;top:{person_top}px;"'
                    f' src="data:image/png;base64,{cutout_b64}">'
                    if cutout_b64 else "")
     subtext_tag = (f'<div class="sub">{_html.escape(subtext)}</div>'
@@ -615,10 +776,11 @@ body{{width:{W}px;height:{H}px;overflow:hidden;position:relative;background:{bg_
 .hl{{
   font-family:{hl_ff},sans-serif;
   font-size:{hero_size}px;
-  line-height:1.02;
+  line-height:1.0;
   color:{hl_hex};
   text-align:center;
   white-space:nowrap;
+  z-index:1;
 }}
 .hw{{color:{acc_hex};}}
 .sup{{
@@ -631,10 +793,14 @@ body{{width:{W}px;height:{H}px;overflow:hidden;position:relative;background:{bg_
   text-align:center;
   white-space:nowrap;
   opacity:0.85;
+  z-index:1;
 }}
 .person{{
-  position:absolute;bottom:0;height:{person_h}px;width:auto;z-index:2;
-  filter:drop-shadow(2px 4px 10px rgba(0,0,0,0.35));
+  position:absolute;
+  height:{person_h}px;
+  width:auto;
+  z-index:2;
+  filter:drop-shadow(2px 4px 12px rgba(0,0,0,0.40));
 }}
 .sub{{display:none;}}
 .cav{{display:none;}}
