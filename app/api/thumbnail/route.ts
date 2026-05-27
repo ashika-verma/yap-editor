@@ -11,19 +11,22 @@ export const dynamic = "force-dynamic";
 const execFileAsync = promisify(execFile);
 
 export async function POST(req: NextRequest) {
-  const { filePath, plan } = (await req.json()) as {
+  const { filePath, plan, layout = "gap" } = (await req.json()) as {
     filePath: string;
     plan: object;
+    layout?: string;
   };
 
   if (!filePath || !existsSync(filePath)) {
     return NextResponse.json({ error: "Video file not found" }, { status: 400 });
   }
 
-  const tmpDir = path.join(process.cwd(), "tmp");
+  // Each run gets its own subdirectory so face frames are never stale-cached
+  const runId = randomUUID();
+  const tmpDir = path.join(process.cwd(), "tmp", `thumb_${runId}`);
   mkdirSync(tmpDir, { recursive: true });
 
-  const planPath = path.join(tmpDir, `${randomUUID()}_thumb_plan.json`);
+  const planPath = path.join(tmpDir, "plan.json");
   writeFileSync(planPath, JSON.stringify(plan));
 
   const venvPython = path.join(process.cwd(), ".venv", "bin", "python3");
@@ -33,8 +36,8 @@ export async function POST(req: NextRequest) {
   try {
     const { stdout, stderr } = await execFileAsync(
       pythonBin,
-      [scriptPath, filePath, "--plan-json", planPath, "--out-dir", tmpDir],
-      { maxBuffer: 100 * 1024 * 1024, timeout: 180_000 },
+      [scriptPath, filePath, "--plan-json", planPath, "--out-dir", tmpDir, "--layout", layout],
+      { maxBuffer: 100 * 1024 * 1024, timeout: 300_000 },
     );
 
     if (stderr) {

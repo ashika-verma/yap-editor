@@ -237,8 +237,9 @@ def _find_speech_onset(audio: np.ndarray, sr: int, t_hint: float, budget: float)
 def _find_silence_cuts(
     audio: np.ndarray, sr: int, seg_start: float, seg_end: float,
     noise_floor_db: float,
+    min_silence: float = MIN_SILENCE,
 ) -> list[dict]:
-    """Return silence regions ≥ MIN_SILENCE seconds within [seg_start, seg_end]."""
+    """Return silence regions ≥ min_silence seconds within [seg_start, seg_end]."""
     s0    = max(0, int(seg_start * sr))
     s1    = min(len(audio), int(seg_end * sr))
     chunk = audio[s0:s1]
@@ -263,7 +264,7 @@ def _find_silence_cuts(
         elif not is_sil and in_silence:
             in_silence = False
             dur = (i - sil_start) * hop_len / sr
-            if dur >= MIN_SILENCE:
+            if dur >= min_silence:
                 t0 = seg_start + sil_start * hop_len / sr
                 t1 = seg_start + i * hop_len / sr
                 cuts.append({"startSec": round(t0, 4), "endSec": round(t1, 4), "word": "<silence>"})
@@ -271,7 +272,7 @@ def _find_silence_cuts(
     # Handle silence running to end of segment
     if in_silence:
         dur = (len(silent_frames) - sil_start) * hop_len / sr
-        if dur >= MIN_SILENCE:
+        if dur >= min_silence:
             t0 = seg_start + sil_start * hop_len / sr
             t1 = seg_end
             cuts.append({"startSec": round(t0, 4), "endSec": round(t1, 4), "word": "<silence>"})
@@ -335,7 +336,7 @@ def refine_word_cuts(
 
         # Add silence-based dead-air cuts for kept segments
         if add_silence_cuts and seg.get("keep", True):
-            for sc in _find_silence_cuts(audio, sr, seg["startSec"], seg["endSec"], noise_floor_db):
+            for sc in _find_silence_cuts(audio, sr, seg["startSec"], seg["endSec"], noise_floor_db, min_sil):
                 covered = any(
                     existing["startSec"] <= sc["startSec"] < existing["endSec"]
                     for existing in refined

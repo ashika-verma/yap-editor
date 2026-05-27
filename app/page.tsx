@@ -380,14 +380,14 @@ export default function Home() {
     });
   };
 
-  const handleGenerateThumbnails = async () => {
+  const handleGenerateThumbnails = async (layout: "gap" | "split" | "editorial" = "editorial") => {
     if (!filePath || !plan) return;
     setIsThumbnailGenerating(true);
     try {
       const res = await fetch("/api/thumbnail", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filePath, plan }),
+        body: JSON.stringify({ filePath, plan, layout }),
       });
       if (!res.ok) {
         const err = await res.json();

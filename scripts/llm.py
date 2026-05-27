@@ -124,8 +124,12 @@ def _openai_compat(
     import urllib.request, urllib.error
 
     base_url = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:1234").rstrip("/")
+    # Callers default to Gemini model names (e.g. "gemini-2.5-flash"), which an
+    # OpenAI-compatible local server rejects with a 400. In local mode, ignore a
+    # Gemini-style name and use the locally configured / detected model instead.
+    passed = model if (model and not model.lower().startswith("gemini")) else None
     effective_model = (
-        model
+        passed
         or os.environ.get("LLM_MODEL")
         or _detect_model(base_url)
     )

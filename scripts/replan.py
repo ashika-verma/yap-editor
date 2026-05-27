@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from continuity import apply_continuity_guard
+from continuity import sanitize_word_cuts
 from filler import apply_filler_cuts
 from linter import lint
 from surgeon import load_audio_from_video, refine_word_cuts
@@ -46,7 +46,11 @@ def rebuild_plan(file_path: str, plan: dict, filler_sensitivity: str | None = No
         except Exception as exc:
             print(f"replan surgeon failed: {exc}", file=sys.stderr)
 
-    segments, continuity_issues = apply_continuity_guard(segments)
+    # Sanitize word-cut edges (remove cuts too close to segment boundaries)
+    # without running the bridge-restoration logic.  The continuity guard already
+    # ran during the initial pipeline pass; re-running bridge restoration here
+    # would silently override the user's reviewed keep/drop decisions.
+    segments = sanitize_word_cuts(segments)
     duration = _duration_from_plan({"segments": segments})
     lint_result = lint(segments, duration)
     segments = lint_result["segments"]
@@ -64,8 +68,8 @@ def rebuild_plan(file_path: str, plan: dict, filler_sensitivity: str | None = No
             "fillerSensitivity": sensitivity,
         },
         "segments": segments,
-        "issues": continuity_issues + lint_result["issues"],
-        "linterIssues": continuity_issues + lint_result["issues"],
+        "issues": lint_result["issues"],
+        "linterIssues": lint_result["issues"],
         "linterPassed": lint_result["passed"],
         "editedDuration": _fmt_ts(kept_sec),
     }

@@ -17,7 +17,7 @@ interface Props {
   onExport: () => void;
   onReset: () => void;
   onCopyTranscript: () => string;
-  onGenerateThumbnails: () => void;
+  onGenerateThumbnails: (layout: "gap" | "split" | "editorial") => void;
   isThumbnailGenerating?: boolean;
 }
 
@@ -34,6 +34,7 @@ export function ExportPanel({
   isThumbnailGenerating = false,
 }: Props) {
   const [copied, setCopied] = useState(false);
+  const [thumbLayout, setThumbLayout] = useState<"gap" | "split" | "editorial">("editorial");
   const isExporting = stage === "exporting" && !exportUrl;
   const isDone = !!exportUrl;
 
@@ -105,8 +106,29 @@ export function ExportPanel({
               )}
               {copied ? "Copied" : "Copy transcript"}
             </button>
+            {/* layout toggle */}
+            <div
+              className="flex items-center rounded-lg border overflow-hidden"
+              style={{ borderColor: "var(--border)" }}
+            >
+              {(["editorial", "split", "gap"] as const).map((opt, idx, arr) => (
+                <button
+                  key={opt}
+                  onClick={() => setThumbLayout(opt)}
+                  className="px-2.5 py-2 text-xs transition-all"
+                  style={{
+                    background: thumbLayout === opt ? "var(--primary)" : "transparent",
+                    color: thumbLayout === opt ? "white" : "var(--muted-foreground)",
+                    fontFamily: "'JetBrains Mono', monospace",
+                    borderRight: idx < arr.length - 1 ? "1px solid var(--border)" : undefined,
+                  }}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
             <button
-              onClick={onGenerateThumbnails}
+              onClick={() => onGenerateThumbnails(thumbLayout)}
               disabled={isThumbnailGenerating}
               className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}

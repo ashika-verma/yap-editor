@@ -166,7 +166,8 @@ def _sanitize_word_cuts(segment: dict, repairs: list[dict], segment_index: int) 
             or segment_end - cut_end < MIN_WORD_CUT_MARGIN
         )
         inverted = cut_end <= cut_start
-        if inverted or (too_close_to_edge and word_cut.get("source") != "manual"):
+        edge_exempt = word_cut.get("source") in ("manual", "silence")
+        if inverted or (too_close_to_edge and not edge_exempt):
             changed = True
             continue
         safe_cuts.append(word_cut)
@@ -179,6 +180,15 @@ def _sanitize_word_cuts(segment: dict, repairs: list[dict], segment_index: int) 
             "segIdx": segment_index,
             "detail": "removed a filler/silence cut too close to a segment boundary",
         })
+
+
+def sanitize_word_cuts(segments: list[dict]) -> list[dict]:
+    """Run only the word-cut edge sanitization pass, without bridge restoration."""
+    result = [dict(segment) for segment in segments]
+    repairs: list[dict] = []
+    for segment_index, segment in enumerate(result):
+        _sanitize_word_cuts(segment, repairs, segment_index)
+    return result
 
 
 def apply_continuity_guard(segments: list[dict]) -> tuple[list[dict], list[dict]]:

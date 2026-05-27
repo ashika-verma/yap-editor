@@ -33,10 +33,13 @@ interface WordCut {
 interface Transition { type: "cut" | "j-cut" | "l-cut"; offsetSec: number; }
 interface ZoomHint { startScale: number; endScale: number; x: number; y: number; }
 
+interface WordTimestamp { word: string; start: number; end: number; }
+
 interface Segment {
   startSec: number;
   endSec: number;
   keep: boolean;
+  words?: WordTimestamp[];
   wordCuts?: WordCut[];
   duckLevel?: number;
   lCutTailSec?: number;
@@ -67,8 +70,11 @@ function computeKeepSpans(
 
   const rawZones = wordCuts
     .map((wc) => ({
-      s: Math.max((wc.renderStartSec ?? wc.startSec) - WORD_CUT_PAD_PRE, wc.startSec, rangeStart),
-      e: Math.min((wc.renderEndSec ?? wc.endSec)   + WORD_CUT_PAD_POST, wc.endSec,   rangeEnd),
+      // renderStart/End already absorb up to half the surrounding silence gap
+      // (bounded in filler.py); the pads add a small fixed margin. Clamp only to
+      // the group range so the cut can extend into the silence around the word.
+      s: Math.max((wc.renderStartSec ?? wc.startSec) - WORD_CUT_PAD_PRE, rangeStart),
+      e: Math.min((wc.renderEndSec ?? wc.endSec)   + WORD_CUT_PAD_POST, rangeEnd),
     }))
     .filter((z) => z.e > z.s)
     .sort((a, b) => a.s - b.s);
@@ -169,7 +175,20 @@ function buildFilters(
       }
     }
 
-    const spans = computeKeepSpans(group.vStart, group.vEnd, wordCutsInRange);
+    const allSpans = computeKeepSpans(group.vStart, group.vEnd, wordCutsInRange);
+    // Drop spans that contain no spoken word. These are silent slivers left
+    // behind when a silence cut only removes the RMS-silent middle of an
+    // inter-word gap, leaving room-tone on either side that clears MIN_SPAN
+    // and would otherwise render as a wordless clip. Skip the guard when the
+    // group has no word timestamps at all, so plans lacking word-level data
+    // (e.g. older/fallback plans) don't lose real speech.
+    const groupWords = group.segs.flatMap(({ seg }) => seg.words ?? []);
+    const spans =
+      groupWords.length === 0
+        ? allSpans
+        : allSpans.filter((span) =>
+            groupWords.some((w) => w.end > span.startSec && w.start < span.endSec),
+          );
 
     for (const [spanInGroupIdx, span] of spans.entries()) {
       const isFirstInGroup = spanInGroupIdx === 0;
@@ -321,9 +340,10 @@ export async function POST(req: NextRequest) {
     if (stream) { sourceW = stream.width; sourceH = stream.height; }
   } catch { /* zoom hints will be skipped if probe fails */ }
 
+  // Only remove the rendered output. The source video is kept so post-export
+  // actions (thumbnail generation, re-export with different settings) still work.
   const cleanup = () => {
     try { unlinkSync(outputPath); } catch {}
-    try { unlinkSync(filePath); } catch {}
   };
 
   try {

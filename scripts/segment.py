@@ -243,6 +243,7 @@ def _absorb_fragments(segments: list[dict]) -> list[dict]:
                         i += 1
                         changed = True
                         continue
+                    new_result.append(prev)  # restore: cap exceeded, can't absorb
             new_result.append(seg)
             i += 1
         result = new_result

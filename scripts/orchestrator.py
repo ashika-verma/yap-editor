@@ -384,7 +384,7 @@ def run_narrative_architect(
 
     if not api_key and not _llm.is_local():
         print("  No GEMINI_API_KEY and no local LLM found — rule-based fallback", file=sys.stderr)
-        return _rule_based_fallback(segments)
+        return _rule_based_fallback(segments, "No Gemini API key")
 
     # ── Pre-pass: deterministic consecutive-duplicate removal ────────────────
     # Catches "captioning / captioning / captioning pipeline" style stutters
@@ -731,7 +731,7 @@ Segments to decide — each shown with its nearest kept neighbours for join-qual
         traceback.print_exc(file=sys.stderr)
 
         # Apply pre-cuts on top of the fallback even if Pass 2 failed
-        fallback = _rule_based_fallback(segments)
+        fallback = _rule_based_fallback(segments, "Gemini edit pass failed")
         for seg in fallback["segments"]:
             if seg["index"] in pre_cut:
                 seg["keep"] = False
@@ -740,7 +740,7 @@ Segments to decide — each shown with its nearest kept neighbours for join-qual
         return fallback
 
 
-def _rule_based_fallback(segments: list[dict]) -> dict:
+def _rule_based_fallback(segments: list[dict], reason: str = "No Gemini API key") -> dict:
     """Fallback when Gemini is unavailable — drops obvious junk heuristically."""
     import re
     ABANDON = {"anyway", "i don't know", "i'm not sure", "so yeah", "nevermind"}
@@ -761,10 +761,9 @@ def _rule_based_fallback(segments: list[dict]) -> dict:
 
         fallback_segs.append({"index": i, "keep": not drop, "dropReason": reason, "jobRisk": ""})
 
-    dropped = sum(1 for s in fallback_segs if not s["keep"])
     return {
         "segments": fallback_segs,
-        "summary": f"Rule-based cut: {dropped}/{len(segments)} dropped. No Gemini API key — review and toggle manually.",
+        "summary": f"{reason} — applied rule-based cuts only. Review and toggle segments manually.",
         "narrativeAnalysis": {},
     }
 

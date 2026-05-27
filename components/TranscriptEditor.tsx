@@ -143,7 +143,8 @@ export function TranscriptEditor({
         return;
       }
       const range = sel.getRangeAt(0);
-      if (!container.contains(range.commonAncestorContainer)) {
+      const ancestor = range.commonAncestorContainer;
+      if (!(ancestor instanceof Node) || !container.contains(ancestor)) {
         setSelPairs(null);
         return;
       }
