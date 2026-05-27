@@ -63,8 +63,16 @@ def generate(
     Raises on failure — callers are responsible for try/except.
     """
     if prefer_cloud and api_key:
-        return _gemini(prompt, schema=schema, model=model, api_key=api_key,
-                       temperature=temperature)
+        try:
+            return _gemini(prompt, schema=schema, model=model, api_key=api_key,
+                           temperature=temperature)
+        except Exception as e:
+            if _is_rate_limited(e) and _probe_local(_DEFAULT_LOCAL_URL):
+                import sys
+                print(f"[llm] Gemini rate limited — falling back to local", file=sys.stderr)
+                return _openai_compat(prompt, schema=schema, model=model,
+                                       temperature=temperature)
+            raise
     if is_local():
         return _openai_compat(prompt, schema=schema, model=model,
                                temperature=temperature)
