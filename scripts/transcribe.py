@@ -50,6 +50,47 @@ def _collapse_loops(words: list[dict]) -> tuple[list[dict], bool]:
     return out, changed
 
 
+_SEG_DEDUP_REPEATS = 3   # ≥ this many consecutive identical segments → collapse to 1
+
+
+def _norm_seg(text: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _dedup_segments(segments: list[dict]) -> list[dict]:
+    """Collapse consecutive near-identical Whisper segments (cross-segment hallucination loops).
+
+    Whisper sometimes emits the same short phrase (e.g. "Bye!") as 4-6 separate
+    1-word segments at the end of a file. Keep the first copy, drop the rest
+    when ≥ SEG_DEDUP_REPEATS in a row match.
+    """
+    if not segments:
+        return segments
+    out: list[dict] = []
+    i = 0
+    while i < len(segments):
+        key = _norm_seg(segments[i]["text"])
+        if not key:
+            out.append(segments[i])
+            i += 1
+            continue
+        # Count consecutive matches
+        j = i + 1
+        while j < len(segments) and _norm_seg(segments[j]["text"]) == key:
+            j += 1
+        reps = j - i
+        if reps >= _SEG_DEDUP_REPEATS:
+            # Keep first, skip the rest
+            out.append(segments[i])
+            print(f"[transcribe] collapsed {reps}× repeated segment: {segments[i]['text']!r}",
+                  file=__import__('sys').stderr)
+        else:
+            out.extend(segments[i:j])
+        i = j
+    return out
+
+
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Usage: transcribe.py <file_path> [model]"}))
@@ -93,6 +134,8 @@ def main():
             "text": text,
             "words": words,
         })
+
+    segments = _dedup_segments(segments)
 
     print(json.dumps({
         "segments": segments,
