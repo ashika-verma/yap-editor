@@ -36,6 +36,28 @@ EDIT_SCHEMA = {
 _norm = lambda t: re.sub(r"[^a-z0-9']", "", t.lower())
 
 
+def _seg_start(seg: dict) -> float:
+    """Get segment start in seconds from either raw Whisper ('start') or shaped ('startSec') format."""
+    for k in ("startSec", "start_sec"):
+        if seg.get(k) is not None:
+            return float(seg[k])
+    v = seg.get("start")
+    if isinstance(v, (int, float)):
+        return float(v)
+    return 0.0
+
+
+def _seg_end(seg: dict) -> float:
+    """Get segment end in seconds from either raw Whisper ('end') or shaped ('endSec') format."""
+    for k in ("endSec", "end_sec"):
+        if seg.get(k) is not None:
+            return float(seg[k])
+    v = seg.get("end")
+    if isinstance(v, (int, float)):
+        return float(v)
+    return 0.0
+
+
 # ── Task 1: Prompt builder ─────────────────────────────────────────────────────
 
 def _build_prompt(flat_words: list[dict], extra_instructions: str = "") -> str:
@@ -111,8 +133,8 @@ def _all_keep(whisper_segments: list[dict]) -> list[dict]:
     """Return §3.3 segments with keep=True and no cuts."""
     out = []
     for seg in whisper_segments:
-        start_sec = seg.get("startSec", seg.get("start_sec", 0.0))
-        end_sec   = seg.get("endSec",   seg.get("end_sec",   0.0))
+        start_sec = _seg_start(seg)
+        end_sec   = _seg_end(seg)
         out.append({
             "startSec":       start_sec,
             "endSec":         end_sec,
@@ -165,8 +187,8 @@ def _apply_deletions(
 
     out = []
     for seg_idx, seg in enumerate(whisper_segments):
-        start_sec = seg.get("startSec", seg.get("start_sec", 0.0))
-        end_sec   = seg.get("endSec",   seg.get("end_sec",   0.0))
+        start_sec = _seg_start(seg)
+        end_sec   = _seg_end(seg)
         words     = seg.get("words", [])
         del_idxs  = sorted(cuts_by_seg.get(seg_idx, []))
         all_deleted = len(words) > 0 and len(del_idxs) == len(words)
