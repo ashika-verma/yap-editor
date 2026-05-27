@@ -150,32 +150,19 @@ _DIRECTOR_DEFAULTS = {
 }
 
 
-def _rule_based_fallback(segments: list[dict], reason: str = "No Gemini API key") -> dict:
-    """Fallback when Gemini is unavailable — drops obvious junk heuristically."""
+def _fmt_ts(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    frac = int((seconds - int(seconds)) * 10)
+    return f"{m}:{s:02d}.{frac}"
+
+
+def _has_filler(text: str) -> bool:
     import re
-    ABANDON = {"anyway", "i don't know", "i'm not sure", "so yeah", "nevermind"}
-
-    fallback_segs = []
-    for i, s in enumerate(segments):
-        text  = s["text"].strip()
-        words = text.split()
-        lower = text.lower()
-
-        filler_hit  = _has_filler(text)
-        is_fragment = len(words) < 4
-        is_filler_segment = filler_hit and len(words) < 8
-        is_abandon  = any(ph in lower for ph in ABANDON) and len(words) < 10
-
-        drop   = is_filler_segment or is_fragment or is_abandon
-        reason = "filler" if is_filler_segment else ("false_start" if is_fragment else ("ramble" if is_abandon else ""))
-
-        fallback_segs.append({"index": i, "keep": not drop, "dropReason": reason, "jobRisk": ""})
-
-    return {
-        "segments": fallback_segs,
-        "summary": f"{reason} — applied rule-based cuts only. Review and toggle segments manually.",
-        "narrativeAnalysis": {},
-    }
+    lower = text.lower()
+    return any(
+        re.search(r"\b" + f.replace(" ", r"\s+") + r"\b", lower)
+        for f in FILLER_WORDS
+    )
 
 
 def _rule_based_fallback_segments(whisper_segments: list[dict]) -> list[dict]:
