@@ -67,6 +67,8 @@ export async function POST(req: NextRequest) {
       },
       segments:          result.segments,
       summary:           result.summary,
+      rationale:         result.rationale ?? "",
+      lowConfidence:     result.lowConfidence ?? false,
       totalDuration:     result.totalDuration,
       editedDuration:    result.editedDuration,
       language:          result.language,
@@ -79,10 +81,13 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ plan });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg    = err instanceof Error ? err.message : String(err);
+    const stderr = (err as { stderr?: string }).stderr ?? "";
     console.error("Orchestrator failed:", msg);
+    if (stderr) console.error("Orchestrator stderr:", stderr.slice(-2000));
+    const detail = stderr ? stderr.slice(-800) : msg.slice(0, 300);
     return NextResponse.json(
-      { error: "Pipeline failed: " + msg.slice(0, 300) },
+      { error: "Pipeline failed: " + detail },
       { status: 500 }
     );
   }

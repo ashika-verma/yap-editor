@@ -150,5 +150,6 @@ def judge_plan(
     text = llm.generate(
         _build_prompt(plan, strict=strict, require_repairs=require_repairs),
         schema=JUDGE_SCHEMA, model=model, api_key=api_key,
+        prefer_cloud=bool(api_key),
     )
     return json.loads(text)
