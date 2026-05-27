@@ -310,7 +310,7 @@ def tighten(
         except Exception as e:
             print(f"[tighten] judge failed on round {r + 1}: {e}", file=sys.stderr)
             if best is None:
-                best = (segments, summary, 0.0, 0)
+                best = (segments, summary, 0.0, 0, rationale)
             break
 
         coherence    = verdict.get("coherence", 0)
