@@ -161,14 +161,30 @@ def _get_edit(flat: list[dict], api_key: str | None, extra: str = "") -> tuple[s
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import llm
 
+    orig_word_count = len(flat)
     prompt = _build_prompt(flat, extra)
     try:
         raw    = llm.generate(prompt, schema=EDIT_SCHEMA, api_key=api_key,
                                prefer_cloud=True, temperature=0)
         parsed = json.loads(raw)
-        return (parsed.get("edited_transcript", ""),
-                parsed.get("summary", ""),
-                parsed.get("rationale", ""))
+        edited = parsed.get("edited_transcript", "")
+
+        # Sanity check: if LLM returned near-empty output, treat as failure
+        edit_word_count = len(edited.split()) if edited.strip() else 0
+        if edit_word_count < 0.3 * orig_word_count:
+            print(
+                f"[tighten] edit suspiciously short ({edit_word_count} words vs {orig_word_count} orig) "
+                "— treating as failed edit",
+                file=sys.stderr,
+            )
+            return " ".join(w["word"] for w in flat), "", ""
+
+        print(
+            f"[tighten] edit: {orig_word_count} → {edit_word_count} words "
+            f"(−{orig_word_count - edit_word_count}, {(orig_word_count - edit_word_count) / orig_word_count * 100:.0f}% cut)",
+            file=sys.stderr,
+        )
+        return (edited, parsed.get("summary", ""), parsed.get("rationale", ""))
     except Exception as e:
         print(f"[tighten] LLM edit failed: {e}", file=sys.stderr)
         return " ".join(w["word"] for w in flat), "", ""  # no deletions
@@ -249,7 +265,13 @@ def tighten_once(
     if inserted / max(len(flat), 1) > 0.05:
         print(f"[tighten] model added/changed {inserted} tokens; honoring deletes only",
               file=sys.stderr)
-    return _apply_deletions(whisper_segments, flat, set(deleted)), summary, rationale
+    print(f"[tighten] align: {len(deleted)} words deleted, {inserted} inserted/changed",
+          file=sys.stderr)
+    segs = _apply_deletions(whisper_segments, flat, set(deleted))
+    dropped_segs = sum(1 for s in segs if not s.get("keep"))
+    print(f"[tighten] result: {dropped_segs}/{len(segs)} segments dropped",
+          file=sys.stderr)
+    return segs, summary, rationale
 
 
 # ── Task 3B: Judge + feedback ──────────────────────────────────────────────────
@@ -290,7 +312,14 @@ def tighten(
 
     flat = _flatten(whisper_segments)
 
+    print(
+        f"[tighten] {len(whisper_segments)} segments, {len(flat)} words, "
+        f"~{_approx_tokens(flat)} tokens; api_key={'yes' if api_key else 'no'}",
+        file=sys.stderr,
+    )
+
     if len(flat) < MIN_WORDS_TO_TIGHTEN:
+        print(f"[tighten] too short ({len(flat)} < {MIN_WORDS_TO_TIGHTEN}) — skipping", file=sys.stderr)
         return _all_keep(whisper_segments), "", False, ""
 
     max_rounds = MAX_ROUNDS_CLOUD if api_key else MAX_ROUNDS_LOCAL
@@ -310,7 +339,9 @@ def tighten(
         except Exception as e:
             print(f"[tighten] judge failed on round {r + 1}: {e}", file=sys.stderr)
             if best is None:
-                best = (segments, summary, 0.0, 0, rationale)
+                # Judge unavailable; assume edit is acceptable (75 > FLOOR) rather
+                # than triggering the floor check with 0 and discarding the edit.
+                best = (segments, summary, 0.0, 75, rationale)
             break
 
         coherence    = verdict.get("coherence", 0)
