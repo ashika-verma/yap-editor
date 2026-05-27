@@ -768,6 +768,42 @@ def _rule_based_fallback(segments: list[dict], reason: str = "No Gemini API key"
     }
 
 
+def _rule_based_fallback_segments(whisper_segments: list[dict]) -> list[dict]:
+    """Return §3.3 segments shaped like tighten output, using simple heuristic keep/drop."""
+    ABANDON = {"anyway", "i don't know", "i'm not sure", "so yeah", "nevermind"}
+    out = []
+    for seg in whisper_segments:
+        text  = seg.get("text", "").strip()
+        words = text.split()
+        lower = text.lower()
+        is_filler_segment = _has_filler(text) and len(words) < 8
+        is_fragment       = len(words) < 4
+        is_abandon        = any(ph in lower for ph in ABANDON) and len(words) < 10
+        drop = is_filler_segment or is_fragment or is_abandon
+        start_sec = seg.get("startSec", seg.get("start", 0.0))
+        end_sec   = seg.get("endSec",   seg.get("end",   0.0))
+        m, s = divmod(int(start_sec), 60)
+        em, es = divmod(int(end_sec), 60)
+        out.append({
+            "startSec":       start_sec,
+            "endSec":         end_sec,
+            "start":          f"{m}:{s:02d}",
+            "end":            f"{em}:{es:02d}",
+            "text":           text,
+            "keep":           not drop,
+            "words":          seg.get("words", []),
+            "wordCuts":       [],
+            "decisionSource": "pipeline",
+            "dropReason":     "filler" if is_filler_segment else ("false_start" if is_fragment else ("ramble" if is_abandon else "")),
+            "jobRisk":        "",
+            "motionScore":    0,
+            "audioRms":       0,
+            "energyScore":    0,
+            "visualTag":      None,
+        })
+    return out
+
+
 # Words that signal a dangling reference to cut context at a segment boundary.
 _DANGLING_OPENERS = {
     "because", "which", "that", "so", "and", "but", "or",
@@ -1130,68 +1166,38 @@ def main() -> None:
         duration = analyze_result.get("duration", whisper_result["segments"][-1]["end"])
         buckets  = analyze_result.get("buckets", [])
 
-        # ── 1b. Semantic Segmenter ─────────────────────────────────────────────
-        if not no_segment and (api_key or _llm.is_local()):
-            print("▶ Semantic Segmenter: merging Whisper fragments into thought units...", file=sys.stderr)
-            try:
-                from segment import segment as _run_segmenter
-                orig_n = len(whisper_result["segments"])
-                whisper_result["segments"] = _run_segmenter(whisper_result["segments"], api_key)
-                new_n = len(whisper_result["segments"])
-                print(f"  {orig_n} Whisper → {new_n} semantic segments", file=sys.stderr)
-            except Exception as e:
-                print(f"  Segmenter failed ({e}), using raw Whisper segments", file=sys.stderr)
-
-        # ── 2. Director ────────────────────────────────────────────────────────
-        print("▶ Director: configuring pipeline...", file=sys.stderr)
+        # ── 2. Tighten: holistic word-level edit + critic loop ────────────────
+        print("▶ Tighten: holistic word-level edit + critic loop...", file=sys.stderr)
+        from tighten import tighten
         if api_key or _llm.is_local():
-            director_cfg = run_director(api_key, analyze_result, whisper_result, duration)
+            segments, summary, low_confidence, rationale = tighten(
+                whisper_result["segments"], api_key
+            )
         else:
-            director_cfg = dict(_DIRECTOR_DEFAULTS)
-            print("  (no API key — using defaults)", file=sys.stderr)
+            segments = _rule_based_fallback_segments(whisper_result["segments"])
+            summary = ""
+            low_confidence = False
+            rationale = ""
 
-        print(f"  content_type={director_cfg['content_type']}, "
-              f"surgeon.aggressiveness={director_cfg['surgeon']['aggressiveness']:.2f}, "
-              f"cut_target={director_cfg['narrative']['cut_target_pct']:.0%}", file=sys.stderr)
-
-        # ── 3. Narrative Architect ─────────────────────────────────────────────
-        print("▶ Narrative Architect: keep/drop decisions...", file=sys.stderr)
-        narrative_result = run_narrative_architect(api_key, whisper_result, analyze_result, director_cfg)
-
-        segments = build_segments(whisper_result, narrative_result, analyze_result)
-        segments = _repair_broken_joins(segments)
         segments = apply_filler_cuts(segments, filler_sensitivity, preserve_manual=True)
 
-        # ── 4. Heuristic Surgeon ───────────────────────────────────────────────
+        # ── 3. Heuristic Surgeon ───────────────────────────────────────────────
         print("▶ Heuristic Surgeon: zero-crossing word cuts + silence removal...", file=sys.stderr)
         try:
             audio, sr = load_audio_from_video(video_path)
-            surg_cfg  = director_cfg.get("surgeon", {})
             segments  = refine_word_cuts(
                 audio, sr, segments,
-                add_silence_cuts=surg_cfg.get("add_silence_cuts", True),
-                aggressiveness=surg_cfg.get("aggressiveness", 0.65),
+                add_silence_cuts=True,
+                aggressiveness=0.65,
             )
         except Exception as e:
             print(f"  Surgeon failed ({e}), skipping zero-crossing snap", file=sys.stderr)
 
-        # ── 5. Continuity Guard ────────────────────────────────────────────────
-        print("▶ Continuity Guard: repairing abrupt transcript joins...", file=sys.stderr)
-        segments, continuity_issues = apply_continuity_guard(segments)
-        if continuity_issues:
-            print(f"  restored/adjusted {len(continuity_issues)} continuity issue(s)", file=sys.stderr)
-
-        # ── 6. The Rhythmist ───────────────────────────────────────────────────
+        # ── 4. The Rhythmist ───────────────────────────────────────────────────
         print("▶ The Rhythmist: J/L-cuts, ducking, zoom hints...", file=sys.stderr)
-        rhy_cfg  = director_cfg.get("rhythmist", {})
-        segments = apply_rhythm(
-            segments, buckets,
-            j_cut_threshold=rhy_cfg.get("j_cut_threshold", 0.30),
-            l_cut_threshold=rhy_cfg.get("l_cut_threshold", 0.30),
-            ducking_enabled=rhy_cfg.get("ducking_enabled", True),
-        )
+        segments = apply_rhythm(segments, buckets)
 
-        # ── 7. Integrity Linter ────────────────────────────────────────────────
+        # ── 5. Integrity Linter ────────────────────────────────────────────────
         print("▶ Integrity Linter: QA checks...", file=sys.stderr)
         lint_result = lint(segments, duration)
         segments    = lint_result["segments"]
@@ -1200,22 +1206,28 @@ def main() -> None:
             print(f"  Linter: {len(errors)} error(s) found", file=sys.stderr)
 
         # ── Build output ───────────────────────────────────────────────────────
-        total_sec  = whisper_result["segments"][-1]["end"] if whisper_result["segments"] else 0
-        kept_sec   = sum(s["endSec"] - s["startSec"] for s in segments if s.get("keep"))
-        summary    = narrative_result.get("summary", "")
+        total_sec = whisper_result["segments"][-1]["end"] if whisper_result["segments"] else 0
+        kept_sec  = sum(s["endSec"] - s["startSec"] for s in segments if s.get("keep"))
 
         output = {
-            "segments":         segments,
-            "summary":          summary,
-            "totalDuration":    _fmt_ts(total_sec),
-            "editedDuration":   _fmt_ts(kept_sec),
-            "language":         whisper_result.get("language", "en"),
-            "directorConfig":   director_cfg,
-            "settings":         {"fillerSensitivity": filler_sensitivity},
-            "narrativeAnalysis": narrative_result.get("narrativeAnalysis", {}),
-            "linterPassed":     lint_result["passed"],
-            "linterIssues":     continuity_issues + lint_result["issues"],
+            "segments":          segments,
+            "summary":           summary,
+            "rationale":         rationale,
+            "lowConfidence":     low_confidence,
+            "totalDuration":     _fmt_ts(total_sec),
+            "editedDuration":    _fmt_ts(kept_sec),
+            "language":          whisper_result.get("language", "en"),
+            "directorConfig":    {},
+            "settings":          {"fillerSensitivity": filler_sensitivity},
+            "narrativeAnalysis": {},
+            "linterPassed":      lint_result["passed"],
+            "linterIssues":      lint_result["issues"],
         }
+
+        # ── Old pipeline (run_director, run_narrative_architect, build_segments,
+        # _repair_broken_joins, _protect_opener, _run_quota_enforcement,
+        # _run_segmenter, apply_continuity_guard) left in place, unreferenced.
+        # Deleted in Task 8 after eval gate passes.
 
     finally:
         sys.stdout = real_stdout

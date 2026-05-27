@@ -50,15 +50,26 @@ def generate(
     schema: dict | None = None,
     model: str | None = None,
     api_key: str | None = None,
+    prefer_cloud: bool = False,
+    temperature: float | None = None,
 ) -> str:
     """
     Generate text. Returns raw string (JSON when schema is given).
 
+    prefer_cloud=True forces Gemini even when LLM_BASE_URL is set (used for
+    edit/critic calls where we want Gemini quality, not local speed).
+    temperature=None uses each backend's default; pass 0 for deterministic runs.
+
     Raises on failure — callers are responsible for try/except.
     """
+    if prefer_cloud and api_key:
+        return _gemini(prompt, schema=schema, model=model, api_key=api_key,
+                       temperature=temperature)
     if is_local():
-        return _openai_compat(prompt, schema=schema, model=model)
-    return _gemini(prompt, schema=schema, model=model, api_key=api_key)
+        return _openai_compat(prompt, schema=schema, model=model,
+                               temperature=temperature)
+    return _gemini(prompt, schema=schema, model=model, api_key=api_key,
+                   temperature=temperature)
 
 
 def generate_vision(
@@ -96,16 +107,20 @@ def _gemini(
     schema: dict | None = None,
     model: str | None = None,
     api_key: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     from google import genai                  # type: ignore
     from google.genai import types as gtypes  # type: ignore
 
     key = api_key or os.environ.get("GEMINI_API_KEY", "")
     client = genai.Client(api_key=key)
-    cfg = gtypes.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema if schema else None,
-    )
+    cfg_kwargs: dict = {
+        "response_mime_type": "application/json",
+        "response_schema":    schema if schema else None,
+    }
+    if temperature is not None:
+        cfg_kwargs["temperature"] = temperature
+    cfg = gtypes.GenerateContentConfig(**cfg_kwargs)
     resp = client.models.generate_content(
         model=model or DEFAULT_GEMINI_MODEL,
         contents=prompt,
@@ -120,6 +135,7 @@ def _openai_compat(
     prompt: str,
     schema: dict | None = None,
     model: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     import urllib.request, urllib.error
 
@@ -152,7 +168,7 @@ def _openai_compat(
             {"role": "system", "content": system},
             {"role": "user",   "content": prompt},
         ],
-        "temperature": 0.3,
+        "temperature": temperature if temperature is not None else 0.3,
     }
 
     # Use json_schema when a schema is provided (LM Studio / vllm support this).

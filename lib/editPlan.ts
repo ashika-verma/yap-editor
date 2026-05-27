@@ -6,7 +6,7 @@ export type WordTimestamp = {
   end: number;
 };
 
-export type WordCutSource = "filler" | "silence" | "manual";
+export type WordCutSource = "filler" | "silence" | "manual" | "trim";
 
 export type WordCut = {
   id?: string;
@@ -97,6 +97,8 @@ export type EditPlan = {
   linterPassed?: boolean;
   directorConfig?: Record<string, unknown>;
   narrativeAnalysis?: NarrativeAnalysis;
+  rationale?: string;
+  lowConfidence?: boolean;
 };
 
 export type JudgeItem = {

@@ -26,7 +26,7 @@ interface WordCut {
   startSec: number;
   endSec: number;
   word?: string;
-  source?: "filler" | "silence" | "manual";
+  source?: "filler" | "silence" | "manual" | "trim";
   renderStartSec?: number;
   renderEndSec?: number;
 }

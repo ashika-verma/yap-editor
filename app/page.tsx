@@ -633,6 +633,8 @@ export default function Home() {
             <TranscriptEditor
               segments={segments}
               summary={plan.summary}
+              rationale={plan.rationale}
+              lowConfidence={plan.lowConfidence}
               narrativeAnalysis={plan.narrativeAnalysis}
               totalDuration={plan.totalDuration}
               keptCount={keptCount}

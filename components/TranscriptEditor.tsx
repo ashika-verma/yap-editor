@@ -16,6 +16,8 @@ import {
 interface Props {
   segments: Segment[];
   summary: string;
+  rationale?: string;
+  lowConfidence?: boolean;
   narrativeAnalysis?: NarrativeAnalysis;
   totalDuration: string;
   keptCount: number;
@@ -104,6 +106,8 @@ type UndoRange = { segIdx: number; startWordIdx: number; endWordIdx: number };
 export function TranscriptEditor({
   segments,
   summary,
+  rationale,
+  lowConfidence,
   narrativeAnalysis,
   totalDuration,
   keptCount,
@@ -251,6 +255,11 @@ export function TranscriptEditor({
             <p className="text-sm leading-relaxed" style={{ color: "var(--foreground)", opacity: 0.75 }}>
               {summary}
             </p>
+            {rationale && (
+              <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)", fontStyle: "italic" }}>
+                {rationale}
+              </p>
+            )}
             {(narrativeAnalysis?.tangents?.length || narrativeAnalysis?.repetitionGroups?.length || narrativeAnalysis?.circularSections?.length) ? (
               <div className="flex flex-wrap gap-1.5 pt-0.5">
                 {narrativeAnalysis.tangents?.map((t, i) => (
@@ -282,6 +291,28 @@ export function TranscriptEditor({
           </div>
         </div>
       </div>
+
+      {/* Low-confidence banner */}
+      {lowConfidence && (
+        <div
+          className="rounded-xl border p-4 flex items-start gap-3"
+          style={{ borderColor: "rgba(245,158,11,0.3)", background: "rgba(245,158,11,0.06)" }}
+        >
+          <svg className="flex-shrink-0 mt-0.5" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 1.5L14.5 13H1.5L8 1.5Z" stroke="#f59e0b" strokeWidth="1.4" strokeLinejoin="round"/>
+            <line x1="8" y1="6" x2="8" y2="9.5" stroke="#f59e0b" strokeWidth="1.4" strokeLinecap="round"/>
+            <circle cx="8" cy="11.5" r="0.6" fill="#f59e0b"/>
+          </svg>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold mb-0.5" style={{ color: "#f59e0b" }}>
+              Auto-edit was low-confidence — transcript left intact
+            </p>
+            <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+              The AI couldn&apos;t produce a confident edit. Review and cut manually, or try replanning.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Job risk banner */}
       {riskyCount > 0 && (
@@ -594,6 +625,9 @@ export function TranscriptEditor({
                     const cut      = findWordCut(seg, w, wi);
                     const isCut    = Boolean(cut);
                     const isManual = cut?.source === "manual";
+                    const isTrim   = cut?.source === "trim";
+                    const cutColor = isManual ? "#38bdf8" : isTrim ? "#ef4444" : "#f59e0b";
+                    const cutColorAlpha = isManual ? "rgba(56,189,248,0.5)" : isTrim ? "rgba(239,68,68,0.5)" : "rgba(245,158,11,0.5)";
                     return (
                       // Space is a separate text node BEFORE the span so that
                       // browser selection anchored in the space does not
@@ -604,17 +638,9 @@ export function TranscriptEditor({
                           data-seg={String(si)}
                           data-word={String(wi)}
                           style={{
-                            color: isCut
-                              ? isManual
-                                ? "#38bdf8"
-                                : "#f59e0b"
-                              : "inherit",
+                            color: isCut ? cutColor : "inherit",
                             textDecorationLine: isCut ? "line-through" : "none",
-                            textDecorationColor: isCut
-                              ? isManual
-                                ? "rgba(56,189,248,0.5)"
-                                : "rgba(245,158,11,0.5)"
-                              : "transparent",
+                            textDecorationColor: isCut ? cutColorAlpha : "transparent",
                             opacity: isCut ? 0.6 : 1,
                           }}
                         >

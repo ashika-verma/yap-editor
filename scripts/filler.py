@@ -208,7 +208,7 @@ def apply_filler_cuts(
         manual_cuts = [
             cut
             for cut in segment.get("wordCuts") or []
-            if preserve_manual and cut.get("source") == "manual"
+            if preserve_manual and cut.get("source") in ("manual", "trim")
         ]
         auto_cuts = compute_filler_cuts(segment, sensitivity)
         seen = {cut.get("id") for cut in manual_cuts if cut.get("id")}
