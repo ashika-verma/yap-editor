@@ -99,6 +99,7 @@ export type EditPlan = {
   narrativeAnalysis?: NarrativeAnalysis;
   rationale?: string;
   lowConfidence?: boolean;
+  enhancedAudioPath?: string | null;
 };
 
 export type JudgeItem = {

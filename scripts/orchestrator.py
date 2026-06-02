@@ -94,12 +94,13 @@ def _run_script(script_name: str, args: list[str]) -> dict:
     return json.loads(proc.stdout)
 
 
-def run_sensor_array(video_path: str, whisper_model: str, no_vision: bool = False) -> tuple[dict, dict]:
+def run_sensor_array(video_path: str, whisper_model: str, no_vision: bool = False, transcribe_source: str | None = None) -> tuple[dict, dict]:
     """Run analyze.py and transcribe.py in parallel. Returns (analyze_result, whisper_result)."""
     analyze_args = [video_path] + (["--no-vision"] if no_vision else [])
+    audio_source = transcribe_source or video_path
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_analyze    = pool.submit(_run_script, "analyze.py",   analyze_args)
-        f_transcribe = pool.submit(_run_script, "transcribe.py", [video_path, whisper_model])
+        f_transcribe = pool.submit(_run_script, "transcribe.py", [audio_source, whisper_model])
         analyze_result   = f_analyze.result()
         transcribe_result = f_transcribe.result()
     return analyze_result, transcribe_result
@@ -234,6 +235,7 @@ def main() -> None:
     video_path    = sys.argv[1]
     no_vision     = "--no-vision" in sys.argv
     save_fixture  = "--save-fixture" in sys.argv
+    do_enhance    = "--enhance" in sys.argv
     # Positional args are everything that isn't a flag
     positional = [a for a in sys.argv[2:] if not a.startswith("--")]
     whisper_model      = positional[0] if len(positional) > 0 else "mlx-community/whisper-large-v3-turbo"
@@ -245,10 +247,33 @@ def main() -> None:
     sys.stdout  = sys.stderr
 
     try:
+        # ── 0. Audio Enhancement (optional) ───────────────────────────────────
+        enhanced_audio_path: str | None = None
+        transcribe_source = video_path
+        if do_enhance:
+            print("▶ Audio Enhancement: running MetricGAN+ + ffmpeg polish...", file=sys.stderr)
+            base = os.path.splitext(video_path)[0]
+            enhanced_audio_path = base + "_enhanced.wav"
+            enhance_script = os.path.join(SCRIPT_DIR, "enhance.py")
+            try:
+                proc = subprocess.run(
+                    [PYTHON, enhance_script, video_path, enhanced_audio_path],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if proc.returncode != 0:
+                    print(f"  Enhancement failed: {proc.stderr[-500:]}", file=sys.stderr)
+                    enhanced_audio_path = None
+                else:
+                    transcribe_source = enhanced_audio_path
+                    print(f"  Enhanced audio → {enhanced_audio_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"  Enhancement skipped: {e}", file=sys.stderr)
+                enhanced_audio_path = None
+
         # ── 1. Sensor Array ────────────────────────────────────────────────────
         print("▶ Sensor Array: running analyze + transcribe in parallel...", file=sys.stderr)
         try:
-            analyze_result, whisper_result = run_sensor_array(video_path, whisper_model, no_vision=no_vision)
+            analyze_result, whisper_result = run_sensor_array(video_path, whisper_model, no_vision=no_vision, transcribe_source=transcribe_source)
         except Exception as e:
             sys.stdout = real_stdout
             sys.stdout.write(json.dumps({"error": f"Sensor Array failed: {e}"}) + "\n")
@@ -318,6 +343,7 @@ def main() -> None:
             "narrativeAnalysis": {},
             "linterPassed":      lint_result["passed"],
             "linterIssues":      lint_result["issues"],
+            "enhancedAudioPath": enhanced_audio_path,
         }
 
 

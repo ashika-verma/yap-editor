@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
 import { ExportPanel } from "@/components/ExportPanel";
 import { ThumbnailStudio, type ThumbnailData } from "@/components/ThumbnailStudio";
+import { VideoTimeline } from "@/components/VideoTimeline";
 import {
   buildCleanTranscript as buildTranscriptText,
   EditPlan,
@@ -26,7 +27,7 @@ export default function Home() {
   const [originalPlan, setOriginalPlan] = useState<EditPlan | null>(null);
   const [fillerSensitivity, setFillerSensitivity] =
     useState<FillerSensitivity>("balanced");
-  const [disableVision, setDisableVision] = useState(false);
+  const [disableVision, setDisableVision] = useState(true);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
@@ -41,6 +42,7 @@ export default function Home() {
   const [thumbnailData, setThumbnailData] = useState<ThumbnailData[] | null>(null);
   const [showThumbnailStudio, setShowThumbnailStudio] = useState(false);
   const [isThumbnailGenerating, setIsThumbnailGenerating] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const segments = useMemo(() => plan?.segments ?? [], [plan?.segments]);
 
@@ -100,18 +102,62 @@ export default function Home() {
     xhr.send(file);
 
     try {
-      const path = await uploadPromise;
-      setFilePath(path);
+      const filePath = await uploadPromise;
+      setFilePath(filePath);
+      // Switch preview to the server-side re-muxed file (moov at front,
+      // 1-second keyframes) so seeking in the timeline is fast.
+      setVideoUrl(`/api/video?path=${encodeURIComponent(filePath)}`);
       setUploadProgress(100);
-      await handleTranscribe(path);
+      await handleTranscribe(filePath);
     } catch {
       toast.error("Upload failed. Try again.");
       setStage("upload");
     }
   }, [handleTranscribe]);
 
+  const handleRangeCut = (ranges: Array<{ segIdx: number; srcStart: number; srcEnd: number }>) => {
+    setPlan((prev) => {
+      if (!prev) return prev;
+      const segments = prev.segments.map((seg, si) => {
+        const range = ranges.find((r) => r.segIdx === si);
+        if (!range || !seg.keep) return seg;
+        const cutStart = Math.max(range.srcStart, seg.startSec);
+        const cutEnd = Math.min(range.srcEnd, seg.endSec);
+        if (cutEnd <= cutStart) return seg;
+        // Full segment covered → drop it
+        if (cutStart <= seg.startSec + 0.05 && cutEnd >= seg.endSec - 0.05) {
+          return { ...seg, keep: false, decisionSource: "user" as const, dropReason: "manual" };
+        }
+        // Partial → add a word cut for the selected region
+        const newCut: WordCut = {
+          id: `${seg.startSec.toFixed(3)}:range:${cutStart.toFixed(3)}`,
+          startSec: cutStart,
+          endSec: cutEnd,
+          word: "[cut]",
+          source: "manual" as const,
+        };
+        return {
+          ...seg,
+          wordCuts: [...(seg.wordCuts ?? []), newCut].sort((a, b) => a.startSec - b.startSec),
+        };
+      });
+      return { ...prev, segments };
+    });
+  };
+
+  const handleTrimSegment = (index: number, newStart: number, newEnd: number) => {
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        segments: prev.segments.map((seg, i) =>
+          i === index ? { ...seg, startSec: newStart, endSec: newEnd } : seg,
+        ),
+      };
+    });
+  };
+
   const handleToggleSegment = (index: number) => {
-    setJudgeResult(null);
     setPlan((prev) =>
       prev
         ? {
@@ -261,28 +307,25 @@ export default function Home() {
             ?.slice(rangeStart, rangeEnd + 1)
             .map((_, offset) => wordCutId(seg, rangeStart + offset)) ?? [],
         );
-        // A word is "covered" by a manual cut if its ID matches directly, OR if it
-        // falls inside a spanning cut (startSec/endSec envelope — handles multi-word
-        // cuts created by a range selection, which use only the first word's ID).
+        // A word is "covered" by ANY cut (any source) if its ID matches or it
+        // falls inside a spanning cut's time envelope.
         const wordIsCovered = (word: { start: number; end: number }, wordIndex: number) =>
           existingCuts.some(
             (cut) =>
-              cut.source === "manual" &&
-              (cut.id === wordCutId(seg, wordIndex) ||
-                (word.start >= cut.startSec && word.end <= cut.endSec)),
+              cut.id === wordCutId(seg, wordIndex) ||
+              (word.start >= cut.startSec && word.end <= cut.endSec),
           );
-        const hasAnyManualCut =
+        const hasAnyCut =
           (seg.words ?? [])
             .slice(rangeStart, rangeEnd + 1)
             .some((word, offset) => wordIsCovered(word, rangeStart + offset));
-        const withoutRangeManualCuts = existingCuts.filter(
+        // Remove ALL cuts (any source) that cover words in the clicked range.
+        const withoutRangeCuts = existingCuts.filter(
           (cut) =>
             !(
-              cut.source === "manual" &&
-              (rangeIds.has(cut.id ?? "") ||
-                // Also remove a spanning cut that fully envelops the range
-                ((seg.words?.[rangeStart]?.start ?? Infinity) >= cut.startSec &&
-                  (seg.words?.[rangeEnd]?.end ?? -Infinity) <= cut.endSec))
+              rangeIds.has(cut.id ?? "") ||
+              ((seg.words?.[rangeStart]?.start ?? Infinity) >= cut.startSec &&
+                (seg.words?.[rangeEnd]?.end ?? -Infinity) <= cut.endSec)
             ),
         );
         const rangeWords = (seg.words ?? []).slice(rangeStart, rangeEnd + 1);
@@ -290,7 +333,7 @@ export default function Home() {
         // sub-threshold keep-spans (inter-word gaps) inside the removed region.
         // For single words, keep the per-word cut format unchanged.
         const addedManualCuts: WordCut[] =
-          hasAnyManualCut || rangeWords.length === 0
+          hasAnyCut || rangeWords.length === 0
             ? []
             : rangeStart === rangeEnd
               ? [{
@@ -309,7 +352,7 @@ export default function Home() {
                 }];
         return {
           ...seg,
-          wordCuts: [...withoutRangeManualCuts, ...addedManualCuts].sort(
+          wordCuts: [...withoutRangeCuts, ...addedManualCuts].sort(
             (a, b) => a.startSec - b.startSec,
           ),
         };
@@ -610,7 +653,7 @@ export default function Home() {
       )}
 
       {/* Main */}
-      <main className="max-w-5xl mx-auto px-4 sm:px-8 py-10">
+      <main className="max-w-[1440px] mx-auto px-4 sm:px-8 py-10">
         {stage === "upload" && (
           <div className="animate-fade-in-up">
             <UploadStage
@@ -630,31 +673,45 @@ export default function Home() {
 
         {(stage === "edit" || stage === "exporting") && plan && (
           <div className="animate-fade-in-up space-y-8">
-            <TranscriptEditor
-              segments={segments}
-              summary={plan.summary}
-              rationale={plan.rationale}
-              lowConfidence={plan.lowConfidence}
-              narrativeAnalysis={plan.narrativeAnalysis}
-              totalDuration={plan.totalDuration}
-              keptCount={keptCount}
-              keptSeconds={keptSeconds}
-              videoUrl={videoUrl}
-              fillerSensitivity={fillerSensitivity}
-              isReplanning={isReplanning}
-              isJudging={isJudging}
-              isRefining={isRefining}
-              refineIterations={refineIterations}
-              judgeResult={judgeResult}
-              onToggle={handleToggleSegment}
-              onToggleWordCut={handleToggleWordCut}
-              onCutRange={handleCutRange}
-              onResetToGemini={handleResetToGemini}
-              onToggleAll={handleToggleAll}
-              onSensitivityChange={handleSensitivityChange}
-              onJudge={handleJudge}
-              onRefine={handleRefine}
-            />
+            <div className="grid grid-cols-[1fr_1.15fr] gap-6 items-start">
+              <TranscriptEditor
+                segments={segments}
+                summary={plan.summary}
+                rationale={plan.rationale}
+                lowConfidence={plan.lowConfidence}
+                narrativeAnalysis={plan.narrativeAnalysis}
+                totalDuration={plan.totalDuration}
+                keptCount={keptCount}
+                keptSeconds={keptSeconds}
+                videoUrl={null}
+                fillerSensitivity={fillerSensitivity}
+                isReplanning={isReplanning}
+                isJudging={isJudging}
+                isRefining={isRefining}
+                refineIterations={refineIterations}
+                judgeResult={judgeResult}
+                onToggle={handleToggleSegment}
+                onToggleWordCut={handleToggleWordCut}
+                onCutRange={handleCutRange}
+                onResetToGemini={handleResetToGemini}
+                onToggleAll={handleToggleAll}
+                onSensitivityChange={handleSensitivityChange}
+                onJudge={handleJudge}
+                onRefine={handleRefine}
+                videoRef={videoRef}
+              />
+              {videoUrl && (
+                <div className="sticky top-6">
+                  <VideoTimeline
+                    segments={segments}
+                    videoUrl={videoUrl}
+                    videoRef={videoRef}
+                    onTrim={handleTrimSegment}
+                    onRangeCut={handleRangeCut}
+                  />
+                </div>
+              )}
+            </div>
             <ExportPanel
               stage={stage}
               progress={exportProgress}

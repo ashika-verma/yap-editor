@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, Fragment } from "react";
+import React, { useState, useRef, useCallback, useEffect, Fragment } from "react";
 import {
   buildCleanTranscript,
   FillerSensitivity,
@@ -37,6 +37,7 @@ interface Props {
   onSensitivityChange: (s: FillerSensitivity) => void;
   onJudge?: () => void;
   onRefine?: () => void;
+  videoRef?: React.RefObject<HTMLVideoElement | null>;
 }
 
 const DROP_REASON_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -127,6 +128,7 @@ export function TranscriptEditor({
   onSensitivityChange,
   onJudge,
   onRefine,
+  videoRef,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
   const [copied, setCopied]       = useState(false);
@@ -134,6 +136,58 @@ export function TranscriptEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const [selPairs, setSelPairs]   = useState<{ segIdx: number; wordIdx: number }[] | null>(null);
   const [undoStack, setUndoStack] = useState<UndoRange[][]>([]);
+
+  // Video playback tracking
+  const [activePos, setActivePos] = useState<{ seg: number; word: number } | null>(null);
+  const lastActivePosKey = useRef("");
+
+  useEffect(() => {
+    if (!videoRef) return;
+    let rafId: number;
+    const tick = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        const t = video.currentTime;
+        let found: { seg: number; word: number } | null = null;
+        for (let si = 0; si < segments.length; si++) {
+          const seg = segments[si];
+          if (!seg.keep || t < seg.startSec || t >= seg.endSec) continue;
+          if (seg.words?.length) {
+            let wi = -1;
+            for (let i = 0; i < seg.words.length; i++) {
+              if (t >= seg.words[i].start) wi = i;
+              if (seg.words[i].end > t) break;
+            }
+            found = { seg: si, word: Math.max(wi, 0) };
+          } else {
+            found = { seg: si, word: -1 };
+          }
+          break;
+        }
+        const key = found ? `${found.seg}:${found.word}` : "";
+        if (key !== lastActivePosKey.current) {
+          lastActivePosKey.current = key;
+          setActivePos(found);
+        }
+      } else if (video?.paused && lastActivePosKey.current !== "") {
+        lastActivePosKey.current = "";
+        setActivePos(null);
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [videoRef, segments]);
+
+  // Scroll active segment into view when it changes
+  const activeSeg = activePos?.seg ?? -1;
+  useEffect(() => {
+    if (activeSeg < 0) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const el = container.querySelector(`[data-seg="${activeSeg}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [activeSeg]);
 
   // selectionchange fires on every selection change (mouse AND keyboard navigation).
   // This replaces the old mouseUp handler and enables Shift+arrow extension.
@@ -552,6 +606,7 @@ export function TranscriptEditor({
           ref={containerRef}
           tabIndex={0}
           onKeyDown={handleKeyDown}
+          data-transcript-editor
           className="focus:outline-none"
           style={{
             fontSize: "14px",
@@ -637,11 +692,27 @@ export function TranscriptEditor({
                         <span
                           data-seg={String(si)}
                           data-word={String(wi)}
+                          onClick={() => {
+                            if (isCut) {
+                              onToggleWordCut(si, wi, false);
+                            } else {
+                              const video = videoRef?.current;
+                              if (video && w.start != null) {
+                                video.currentTime = w.start;
+                              }
+                            }
+                          }}
                           style={{
                             color: isCut ? cutColor : "inherit",
                             textDecorationLine: isCut ? "line-through" : "none",
                             textDecorationColor: isCut ? cutColorAlpha : "transparent",
                             opacity: isCut ? 0.6 : 1,
+                            background: activePos?.seg === si && activePos?.word === wi && !isCut
+                              ? "rgba(20,184,166,0.28)"
+                              : "transparent",
+                            borderRadius: 3,
+                            transition: "background 0.08s",
+                            cursor: isCut ? "pointer" : videoRef ? "pointer" : "text",
                           }}
                         >
                           {w.word}

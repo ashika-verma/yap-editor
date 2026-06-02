@@ -132,6 +132,7 @@ function buildFilters(
   videoDuration: number,
   sourceW = 0,
   sourceH = 0,
+  audioInputIdx = 0,
 ): { filterComplex: string; vMap: string; aMap: string; spanCount: number } {
   const vParts: string[] = [];
   const aParts: string[] = [];
@@ -272,7 +273,7 @@ function buildFilters(
       // Delay positions this stream at the correct output time
       aChain.push(`adelay=${delayMs}:all=1`);
 
-      aParts.push(`[0:a]${aChain.join(",")}[a${spanIdx}]`);
+      aParts.push(`[${audioInputIdx}:a]${aChain.join(",")}[a${spanIdx}]`);
       aOutputs.push(`[a${spanIdx}]`);
 
       videoOutputSec += spanVideoDur;
@@ -301,10 +302,11 @@ function buildFilters(
 export async function POST(req: NextRequest) {
   const { filePath, plan, segments: legacySegments } = (await req.json()) as {
     filePath: string;
-    plan?: { version?: number; segments?: Segment[] };
+    plan?: { version?: number; segments?: Segment[]; enhancedAudioPath?: string };
     segments?: Segment[];
   };
   const segments = plan?.segments ?? legacySegments;
+  const enhancedAudioPath = plan?.enhancedAudioPath ?? null;
 
   if (!filePath || !existsSync(filePath)) {
     return NextResponse.json({ error: "Source file not found" }, { status: 400 });
@@ -347,16 +349,22 @@ export async function POST(req: NextRequest) {
   };
 
   try {
+    const useEnhanced = enhancedAudioPath && existsSync(enhancedAudioPath);
+    const audioInputIdx = useEnhanced ? 1 : 0;
     const { filterComplex, vMap, aMap, spanCount } = buildFilters(
-      keptSegments, segments, videoDuration, sourceW, sourceH
+      keptSegments, segments, videoDuration, sourceW, sourceH, audioInputIdx
     );
 
     if (spanCount === 0) {
       return NextResponse.json({ error: "No renderable spans after processing" }, { status: 400 });
     }
 
+    const ffmpegInputs = useEnhanced
+      ? ["-i", filePath, "-i", enhancedAudioPath!]
+      : ["-i", filePath];
+
     await execFileAsync(FFMPEG, [
-      "-i", filePath,
+      ...ffmpegInputs,
       "-filter_complex", filterComplex,
       "-map", vMap,
       "-map", aMap,

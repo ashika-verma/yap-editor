@@ -10,8 +10,7 @@ export const maxDuration = 600;
 
 const execFileAsync = promisify(execFile);
 
-const POETRY_VENV = "/Users/ashikaverma/Library/Caches/pypoetry/virtualenvs/transcript-editor-py-pSpjchbs-py3.14";
-const PYTHON = path.join(POETRY_VENV, "bin", "python");
+const PYTHON = path.join(process.cwd(), ".venv", "bin", "python3");
 const ORCHESTRATOR = path.join(process.cwd(), "scripts", "orchestrator.py");
 const WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo";
 
@@ -23,7 +22,7 @@ export async function POST(req: NextRequest) {
 
   console.log("Running orchestrator pipeline...");
 
-  const orchestratorArgs = [ORCHESTRATOR, filePath, WHISPER_MODEL, fillerSensitivity];
+  const orchestratorArgs = [ORCHESTRATOR, filePath, WHISPER_MODEL, fillerSensitivity, "--enhance"];
   if (disableVision) orchestratorArgs.push("--no-vision");
 
   try {
@@ -77,6 +76,7 @@ export async function POST(req: NextRequest) {
       linterIssues:      issues,
       directorConfig:    result.directorConfig,
       narrativeAnalysis: result.narrativeAnalysis ?? {},
+      enhancedAudioPath: result.enhancedAudioPath ?? null,
     };
 
     return NextResponse.json({ plan });

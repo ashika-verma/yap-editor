@@ -5,89 +5,92 @@ Usage: python transcribe.py <file_path> [model_repo]
 """
 import sys
 import json
+import os
+import subprocess
+import tempfile
 import mlx_whisper
 
-# Minimum consecutive repeats of a token cycle before we treat it as a Whisper
-# hallucination loop (e.g. "of being of being of being…"). Genuine emphasis
-# ("no no no") tops out around 3, so 4 is a safe floor.
-LOOP_MIN_REPEATS = 4
-LOOP_MAX_PERIOD  = 4  # longest repeating unit to detect (in words)
+# Fix macOS SSL cert verification so torchaudio can download alignment model
+import ssl
+try:
+    import certifi
+    ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    pass
 
 
-def _collapse_loops(words: list[dict]) -> tuple[list[dict], bool]:
-    """Collapse degenerate repeated word-cycles (Whisper hallucination loops).
+def _extract_wav(video_path: str, wav_path: str) -> None:
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "16000",
+         "-sample_fmt", "s16", wav_path],
+        capture_output=True, check=True,
+    )
 
-    Detects a unit of 1–LOOP_MAX_PERIOD words repeating ≥ LOOP_MIN_REPEATS times
-    consecutively and keeps a single copy, dropping the looped tail. Returns
-    (words, changed).
+
+def _forced_align_segments(wav_path: str, segments: list[dict]) -> list[dict]:
     """
-    if not words:
-        return words, False
-    toks = [w["word"].strip().lower() for w in words]
-    n = len(words)
-    out: list[dict] = []
-    i = 0
-    changed = False
-    while i < n:
-        collapsed = False
-        for p in range(1, LOOP_MAX_PERIOD + 1):
-            if i + p * LOOP_MIN_REPEATS > n:
-                continue
-            unit = toks[i : i + p]
-            reps, j = 1, i + p
-            while j + p <= n and toks[j : j + p] == unit:
-                reps += 1
-                j += p
-            if reps >= LOOP_MIN_REPEATS:
-                out.extend(words[i : i + p])  # keep one copy of the unit
-                i = j
-                collapsed = True
-                changed = True
-                break
-        if not collapsed:
-            out.append(words[i])
-            i += 1
-    return out, changed
-
-
-_SEG_DEDUP_REPEATS = 3   # ≥ this many consecutive identical segments → collapse to 1
-
-
-def _norm_seg(text: str) -> str:
-    import re
-    return re.sub(r"[^a-z0-9]", "", text.lower())
-
-
-def _dedup_segments(segments: list[dict]) -> list[dict]:
-    """Collapse consecutive near-identical Whisper segments (cross-segment hallucination loops).
-
-    Whisper sometimes emits the same short phrase (e.g. "Bye!") as 4-6 separate
-    1-word segments at the end of a file. Keep the first copy, drop the rest
-    when ≥ SEG_DEDUP_REPEATS in a row match.
+    Replace Whisper word timestamps with WhisperX forced-alignment timestamps.
+    Uses wav2vec2-base-960h (English-specific, 360MB) via whisperx.alignment.
+    Falls back to original Whisper timestamps if anything goes wrong.
     """
-    if not segments:
-        return segments
-    out: list[dict] = []
-    i = 0
-    while i < len(segments):
-        key = _norm_seg(segments[i]["text"])
-        if not key:
-            out.append(segments[i])
-            i += 1
+    import numpy as np
+    import librosa
+    from whisperx.alignment import load_align_model, align
+
+    print("[transcribe] loading WhisperX alignment model...", file=sys.stderr)
+    model_a, metadata = load_align_model(language_code="en", device="cpu")
+
+    # Load audio as float32 numpy array at 16kHz (whisperx expects this format)
+    audio, _ = librosa.load(wav_path, sr=16000, mono=True)
+
+    # whisperx.align expects segments with "text", "start", "end" fields
+    wx_segments = [
+        {"text": seg["text"], "start": seg["start"], "end": seg["end"]}
+        for seg in segments
+    ]
+
+    print("[transcribe] running forced alignment...", file=sys.stderr)
+    result = align(
+        wx_segments,
+        model_a,
+        metadata,
+        audio,
+        device="cpu",
+        return_char_alignments=False,
+    )
+
+    # Merge aligned word timestamps back into original segments
+    aligned = result.get("segments", [])
+    out = []
+    for orig_seg, aligned_seg in zip(segments, aligned):
+        aligned_words = aligned_seg.get("words", [])
+        if not aligned_words:
+            out.append(orig_seg)
             continue
-        # Count consecutive matches
-        j = i + 1
-        while j < len(segments) and _norm_seg(segments[j]["text"]) == key:
-            j += 1
-        reps = j - i
-        if reps >= _SEG_DEDUP_REPEATS:
-            # Keep first, skip the rest
-            out.append(segments[i])
-            print(f"[transcribe] collapsed {reps}× repeated segment: {segments[i]['text']!r}",
-                  file=__import__('sys').stderr)
-        else:
-            out.extend(segments[i:j])
-        i = j
+
+        # Map aligned words back to original words by position
+        orig_words = orig_seg.get("words", [])
+        new_words = []
+        _MAX_SHIFT = 0.5  # discard alignment if it moves a boundary more than 500ms
+        import math
+        for i, orig_w in enumerate(orig_words):
+            if i < len(aligned_words):
+                aw = aligned_words[i]
+                aw_start = aw.get("start", orig_w["start"])
+                aw_end   = aw.get("end",   orig_w["end"])
+                # Reject NaN/inf or unreasonable drift — keep Whisper's timestamp
+                if (math.isfinite(aw_start) and math.isfinite(aw_end)
+                        and aw_end > aw_start
+                        and abs(aw_end - orig_w["end"]) <= _MAX_SHIFT
+                        and abs(aw_start - orig_w["start"]) <= _MAX_SHIFT):
+                    new_words.append({**orig_w, "start": round(aw_start, 3), "end": round(aw_end, 3)})
+                else:
+                    new_words.append(orig_w)
+            else:
+                new_words.append(orig_w)
+
+        out.append({**orig_seg, "words": new_words})
+
     return out
 
 
@@ -99,9 +102,6 @@ def main():
     audio_path = sys.argv[1]
     model = sys.argv[2] if len(sys.argv) > 2 else "mlx-community/whisper-large-v3-turbo"
 
-    # Redirect stdout to stderr during transcription so any mlx_whisper
-    # diagnostic prints ("Detected language: ...") don't corrupt our JSON output.
-    import io
     old_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -111,6 +111,10 @@ def main():
             word_timestamps=True,
             verbose=False,
             language="en",
+            initial_prompt="Um, well, uh, like I said, he- he went to the store. A lot of- a lot of things happened.",
+            condition_on_previous_text=True,
+            compression_ratio_threshold=2.8,
+            no_speech_threshold=0.4,
         )
     finally:
         sys.stdout = old_stdout
@@ -121,26 +125,62 @@ def main():
             {"word": w["word"].strip(), "start": round(w["start"], 3), "end": round(w["end"], 3)}
             for w in seg.get("words", [])
         ]
-        words, looped = _collapse_loops(words)
-        if looped and words:
-            text = " ".join(w["word"] for w in words).strip()
-            seg_end = words[-1]["end"]
-        else:
-            text = seg["text"].strip()
-            seg_end = round(seg["end"], 3)
+        text = seg["text"].strip()
+        if not text:
+            continue
         segments.append({
             "start": round(seg["start"], 3),
-            "end": seg_end,
-            "text": text,
+            "end":   round(seg["end"], 3),
+            "text":  text,
             "words": words,
         })
 
-    segments = _dedup_segments(segments)
+    # Forced alignment: replace Whisper timestamps with phoneme-accurate ones
+    # Redirect stdout → stderr during alignment so WhisperX's internal print()
+    # calls ("Failed to align segment ...") don't pollute our JSON output.
+    old_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+    try:
+        print("[transcribe] extracting audio for forced alignment...", file=sys.stderr)
+        _extract_wav(audio_path, wav_path)
+        pre_align = [
+            (w["word"], w["start"], w["end"])
+            for seg in segments for w in seg.get("words", [])
+        ]
+        segments = _forced_align_segments(wav_path, segments)
+        post_align = [
+            (w["word"], w["start"], w["end"])
+            for seg in segments for w in seg.get("words", [])
+        ]
+        # Log words where alignment shifted the boundary by >20ms
+        diffs = [
+            f"  {pre[0]!r}: end {pre[2]:.3f}→{post[2]:.3f} ({(post[2]-pre[2])*1000:+.0f}ms)"
+            for pre, post in zip(pre_align, post_align)
+            if abs(post[2] - pre[2]) > 0.02
+        ]
+        if diffs:
+            print(f"[transcribe] alignment shifted {len(diffs)} word boundaries >20ms:",
+                  file=sys.stderr)
+            for d in diffs[:20]:
+                print(d, file=sys.stderr)
+        else:
+            print("[transcribe] alignment: no boundaries shifted >20ms", file=sys.stderr)
+    except Exception as e:
+        print(f"[transcribe] forced alignment skipped: {e}", file=sys.stderr)
+    finally:
+        sys.stdout = old_stdout
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
 
     print(json.dumps({
         "segments": segments,
         "language": result.get("language", "en"),
     }))
+
 
 if __name__ == "__main__":
     main()
