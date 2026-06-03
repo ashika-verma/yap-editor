@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
@@ -19,6 +20,16 @@ import {
 type Stage = "upload" | "transcribing" | "edit" | "exporting";
 
 export default function Home() {
+  return (
+    <Suspense>
+      <HomeInner />
+    </Suspense>
+  );
+}
+
+function HomeInner() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [stage, setStage] = useState<Stage>("upload");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [filePath, setFilePath] = useState<string | null>(null);
@@ -28,6 +39,10 @@ export default function Home() {
   const [fillerSensitivity, setFillerSensitivity] =
     useState<FillerSensitivity>("balanced");
   const [disableVision, setDisableVision] = useState(true);
+  const [disableLLM, setDisableLLM] = useState(false);
+  const [leftPanelPct, setLeftPanelPct] = useState(46);
+  const [isDraggingDivider, setIsDraggingDivider] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
@@ -42,9 +57,66 @@ export default function Home() {
   const [thumbnailData, setThumbnailData] = useState<ThumbnailData[] | null>(null);
   const [showThumbnailStudio, setShowThumbnailStudio] = useState(false);
   const [isThumbnailGenerating, setIsThumbnailGenerating] = useState(false);
+  const [customAudioPath, setCustomAudioPath] = useState<string | null>(null);
+  const [customAudioName, setCustomAudioName] = useState<string | null>(null);
+  const [exportedVideoPath, setExportedVideoPath] = useState<string | null>(null);
+  const [exportedAudioPath, setExportedAudioPath] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const segments = useMemo(() => plan?.segments ?? [], [plan?.segments]);
+
+  // Load project from ?project= URL param
+  useEffect(() => {
+    const projectId = searchParams.get("project");
+    if (!projectId) return;
+    fetch(`/api/projects/${projectId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) { toast.error(d.error); return; }
+        setFilePath(d.filePath);
+        setVideoUrl(`/api/video?path=${encodeURIComponent(d.filePath)}`);
+        setPlan(d.plan);
+        setOriginalPlan(d.plan);
+        setFillerSensitivity(d.plan.settings?.fillerSensitivity ?? "balanced");
+        setStage("edit");
+        router.replace("/");
+      })
+      .catch(() => toast.error("Failed to load project"));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Warn before leaving (swipe-back, tab close, refresh) when a project is active.
+  useEffect(() => {
+    if (stage === "upload") return;
+    const guard = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [stage]);
+
+  // Dynamic favicon based on pipeline stage.
+  useEffect(() => {
+    const svgs: Record<string, string> = {
+      idle: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%236366f1"/><path d="M6 6v20M6 16h20M26 9L20 16l6 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`,
+      processing: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23f59e0b"/><circle cx="16" cy="16" r="9" fill="none" stroke="white" stroke-width="3" stroke-dasharray="20 36" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="1s" repeatCount="indefinite"/></circle></svg>`,
+      done: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%2322c55e"/><path d="M8 16l5.5 5.5L24 10" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`,
+    };
+
+    const key = exportUrl ? "done"
+      : (stage === "transcribing" || stage === "exporting") ? "processing"
+      : "idle";
+
+    let link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.type = "image/svg+xml";
+    link.href = `data:image/svg+xml,${svgs[key]}`;
+  }, [stage, exportUrl]);
 
   const handleTranscribe = useCallback(async (path: string) => {
     setStage("transcribing");
@@ -52,7 +124,7 @@ export default function Home() {
       const res = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filePath: path, fillerSensitivity, disableVision }),
+        body: JSON.stringify({ filePath: path, fillerSensitivity, disableVision, disableLLM }),
       });
 
       if (!res.ok) {
@@ -60,10 +132,13 @@ export default function Home() {
         throw new Error(err.error || "Transcription failed");
       }
 
-      const data: { plan: EditPlan } = await res.json();
+      const data: { plan: EditPlan; previewVideoPath?: string | null } = await res.json();
       setPlan(data.plan);
       setOriginalPlan(data.plan);
       setFillerSensitivity(data.plan.settings.fillerSensitivity);
+      if (data.previewVideoPath) {
+        setVideoUrl(`/api/video?path=${encodeURIComponent(data.previewVideoPath)}`);
+      }
       setStage("edit");
     } catch (err: unknown) {
       const message =
@@ -449,6 +524,46 @@ export default function Home() {
     }
   };
 
+  const handleSave = async () => {
+    if (!filePath || !plan || isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath, plan }),
+      });
+      if (!res.ok) throw new Error("Save failed");
+      toast.success("Project saved");
+    } catch {
+      toast.error("Failed to save project");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDividerMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingDivider(true);
+    const startX = e.clientX;
+    const startPct = leftPanelPct;
+    const container = (e.currentTarget as HTMLElement).parentElement;
+    if (!container) return;
+    const totalWidth = container.getBoundingClientRect().width;
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      const newPct = Math.min(80, Math.max(20, startPct + (delta / totalWidth) * 100));
+      setLeftPanelPct(newPct);
+    };
+    const onUp = () => {
+      setIsDraggingDivider(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const handleExport = async () => {
     if (!filePath || !plan) return;
     setStage("exporting");
@@ -475,7 +590,7 @@ export default function Home() {
       const res = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filePath, plan: finalized.plan }),
+        body: JSON.stringify({ filePath, plan: finalized.plan, customAudioPath }),
       });
 
       clearInterval(interval);
@@ -489,6 +604,12 @@ export default function Home() {
         throw new Error(errMsg);
       }
 
+      // Grab paths for the Adobe Podcast round-trip before consuming the body
+      const vidPath = res.headers.get("X-Exported-Video-Path");
+      const audPath = res.headers.get("X-Exported-Audio-Path");
+      if (vidPath) setExportedVideoPath(vidPath);
+      if (audPath) setExportedAudioPath(audPath);
+
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       setExportUrl(url);
@@ -501,6 +622,44 @@ export default function Home() {
     }
   };
 
+  const handleRemoveSilenceCut = useCallback((segIdx: number, cutStartSec: number) => {
+    setPlan(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        segments: prev.segments.map((seg, i) =>
+          i !== segIdx ? seg : {
+            ...seg,
+            wordCuts: (seg.wordCuts ?? []).filter(
+              c => !(c.source === "silence" && Math.abs(c.startSec - cutStartSec) < 0.05),
+            ),
+          },
+        ),
+      };
+    });
+  }, []);
+
+  const handleAudioUpload = useCallback(async (file: File) => {
+    const res = await fetch("/api/upload-audio", {
+      method: "POST",
+      headers: { "Content-Type": file.type || "audio/wav" },
+      body: file,
+    });
+    if (!res.ok) throw new Error("Audio upload failed");
+    const { audioPath } = await res.json();
+    setCustomAudioPath(audioPath);
+    setCustomAudioName(file.name);
+  }, []);
+
+  const handleReExport = () => {
+    setExportUrl(null);
+    setExportedVideoPath(null);
+    setExportedAudioPath(null);
+    setCustomAudioPath(null);
+    setCustomAudioName(null);
+    setStage("edit");
+  };
+
   const handleReset = () => {
     setStage("upload");
     setFilePath(null);
@@ -511,12 +670,49 @@ export default function Home() {
     setUploadProgress(0);
     setExportProgress(0);
     setLastWordSelection(null);
+    setCustomAudioPath(null);
+    setCustomAudioName(null);
+    setExportedVideoPath(null);
+    setExportedAudioPath(null);
   };
+
+  const handleRemux = useCallback(async (audioPath: string) => {
+    if (!exportedVideoPath) return;
+    const res = await fetch("/api/remux", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoPath: exportedVideoPath, audioPath }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || "Remux failed");
+    }
+    const blob = await res.blob();
+    setExportUrl(URL.createObjectURL(blob));
+  }, [exportedVideoPath]);
 
   const keptCount = segments.filter((s) => s.keep).length;
   const keptSeconds = segments
     .filter((s) => s.keep)
-    .reduce((acc, s) => acc + (s.endSec - s.startSec), 0);
+    .reduce((acc, s) => {
+      if (!s.wordCuts || s.wordCuts.length === 0) {
+        return acc + (s.endSec - s.startSec);
+      }
+      // If segment has word cuts, calculate actual kept spans (same logic as export)
+      const wordCuts = s.wordCuts.sort((a, b) => a.startSec - b.startSec);
+      let spanDuration = 0;
+      let cursor = s.startSec;
+      for (const wc of wordCuts) {
+        const cutStart = Math.max((wc.renderStartSec ?? wc.startSec) - 0.003, s.startSec);
+        const cutEnd = Math.min((wc.renderEndSec ?? wc.endSec) + 0.018, s.endSec);
+        if (cutEnd > cutStart && cutStart - cursor >= 0.15) {
+          spanDuration += cutStart - cursor;
+        }
+        cursor = Math.max(cursor, cutEnd);
+      }
+      if (s.endSec - cursor >= 0.15) spanDuration += s.endSec - cursor;
+      return acc + spanDuration;
+    }, 0);
 
   const stageIndex = ["upload", "transcribing", "edit", "exporting"].indexOf(
     stage,
@@ -620,7 +816,35 @@ export default function Home() {
           )}
         </div>
 
-        <div className="w-24 flex justify-end">
+        <div className="flex items-center gap-2 justify-end" style={{ minWidth: 160 }}>
+          <a
+            href="/projects"
+            className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent", textDecoration: "none" }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--foreground)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--muted-foreground)"; }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <rect x="1" y="1" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+              <rect x="7" y="1" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+              <rect x="1" y="7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+              <rect x="7" y="7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
+            </svg>
+            Projects
+          </a>
+          {(stage === "edit" || stage === "exporting") && (
+            <button
+              onClick={handleSave}
+              disabled={isSaving}
+              className="text-xs px-3 py-1.5 rounded transition-all duration-150 flex items-center gap-1.5"
+              style={{ background: "var(--primary)", color: "white", opacity: isSaving ? 0.6 : 1 }}
+            >
+              <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                <path d="M1 8.5V10h1.5l4.5-4.5-1.5-1.5L1 8.5zM9.7 2.3a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.4 0L6.5 1.5 8 3l1.7-1.7z" fill="currentColor"/>
+              </svg>
+              {isSaving ? "Saving…" : "Save"}
+            </button>
+          )}
           {stage !== "upload" && stage !== "transcribing" && (
             <button
               onClick={handleReset}
@@ -645,6 +869,7 @@ export default function Home() {
         </div>
       </header>
 
+
       {showThumbnailStudio && thumbnailData && (
         <ThumbnailStudio
           thumbnails={thumbnailData}
@@ -661,6 +886,8 @@ export default function Home() {
               uploadProgress={uploadProgress}
               disableVision={disableVision}
               onDisableVisionChange={setDisableVision}
+              disableLLM={disableLLM}
+              onDisableLLMChange={setDisableLLM}
             />
           </div>
         )}
@@ -673,7 +900,11 @@ export default function Home() {
 
         {(stage === "edit" || stage === "exporting") && plan && (
           <div className="animate-fade-in-up space-y-8">
-            <div className="grid grid-cols-[1fr_1.15fr] gap-6 items-start">
+            <div
+              style={{ display: "flex", gap: 0, alignItems: "start", minHeight: 0 }}
+            >
+            {/* left panel — transcript only */}
+            <div style={{ flex: `0 0 ${leftPanelPct}%`, minWidth: "20%", maxWidth: "80%" }}>
               <TranscriptEditor
                 segments={segments}
                 summary={plan.summary}
@@ -693,6 +924,7 @@ export default function Home() {
                 onToggle={handleToggleSegment}
                 onToggleWordCut={handleToggleWordCut}
                 onCutRange={handleCutRange}
+                onRemoveSilenceCut={handleRemoveSilenceCut}
                 onResetToGemini={handleResetToGemini}
                 onToggleAll={handleToggleAll}
                 onSensitivityChange={handleSensitivityChange}
@@ -700,30 +932,63 @@ export default function Home() {
                 onRefine={handleRefine}
                 videoRef={videoRef}
               />
-              {videoUrl && (
-                <div className="sticky top-6">
-                  <VideoTimeline
-                    segments={segments}
-                    videoUrl={videoUrl}
-                    videoRef={videoRef}
-                    onTrim={handleTrimSegment}
-                    onRangeCut={handleRangeCut}
-                  />
-                </div>
-              )}
             </div>
-            <ExportPanel
-              stage={stage}
-              progress={exportProgress}
-              exportUrl={exportUrl}
-              keptSegments={keptCount}
-              keptSeconds={keptSeconds}
-              onExport={handleExport}
-              onReset={handleReset}
-              onCopyTranscript={buildCleanTranscript}
-              onGenerateThumbnails={handleGenerateThumbnails}
-              isThumbnailGenerating={isThumbnailGenerating}
-            />
+
+            {/* drag handle */}
+            <div
+              onMouseDown={handleDividerMouseDown}
+              style={{
+                width: 6,
+                flexShrink: 0,
+                cursor: "col-resize",
+                alignSelf: "stretch",
+                background: "transparent",
+                position: "relative",
+                zIndex: 10,
+              }}
+            >
+              <div style={{
+                position: "absolute",
+                inset: "0 2px",
+                borderRadius: 2,
+                background: isDraggingDivider ? "var(--primary)" : "var(--border)",
+                transition: isDraggingDivider ? "none" : "background 0.2s",
+              }} />
+            </div>
+
+            {/* right panel — video + timeline + export, sticks as one unit */}
+            <div style={{ flex: 1, minWidth: "20%", paddingLeft: 12, display: "flex", flexDirection: "column", gap: 16, position: "sticky", top: 72, alignSelf: "start" }}>
+              {videoUrl && (
+                <VideoTimeline
+                  segments={segments}
+                  videoUrl={videoUrl}
+                  videoRef={videoRef}
+                  onTrim={handleTrimSegment}
+                  onRangeCut={handleRangeCut}
+                />
+              )}
+              <ExportPanel
+                stage={stage}
+                progress={exportProgress}
+                exportUrl={exportUrl}
+                keptSegments={keptCount}
+                keptSeconds={keptSeconds}
+                exportedAudioUrl={exportedAudioPath
+                  ? `/api/video?path=${encodeURIComponent(exportedAudioPath)}`
+                  : null}
+                onExport={handleExport}
+                onReExport={handleReExport}
+                onReset={handleReset}
+                onCopyTranscript={buildCleanTranscript}
+                onGenerateThumbnails={handleGenerateThumbnails}
+                onAudioUpload={handleAudioUpload}
+                onRemux={handleRemux}
+                isThumbnailGenerating={isThumbnailGenerating}
+              />
+            </div>
+            {/* close flex container */}
+          </div>
+          {/* close space-y-8 */}
           </div>
         )}
       </main>

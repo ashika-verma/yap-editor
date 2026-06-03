@@ -234,6 +234,7 @@ def main() -> None:
 
     video_path    = sys.argv[1]
     no_vision     = "--no-vision" in sys.argv
+    no_llm        = "--no-llm"     in sys.argv
     save_fixture  = "--save-fixture" in sys.argv
     do_enhance    = "--enhance" in sys.argv
     # Positional args are everything that isn't a flag
@@ -251,7 +252,7 @@ def main() -> None:
         enhanced_audio_path: str | None = None
         transcribe_source = video_path
         if do_enhance:
-            print("▶ Audio Enhancement: running MetricGAN+ + ffmpeg polish...", file=sys.stderr)
+            print("▶ Audio Enhancement: resemble-enhance denoiser + EQ...", file=sys.stderr)
             base = os.path.splitext(video_path)[0]
             enhanced_audio_path = base + "_enhanced.wav"
             enhance_script = os.path.join(SCRIPT_DIR, "enhance.py")
@@ -290,15 +291,29 @@ def main() -> None:
         # ── 2. Tighten: holistic word-level edit + critic loop ────────────────
         print("▶ Tighten: holistic word-level edit + critic loop...", file=sys.stderr)
         from tighten import tighten
-        if api_key or _llm.is_local():
-            segments, summary, low_confidence, rationale = tighten(
-                whisper_result["segments"], api_key
-            )
-        else:
+        if no_llm:
+            print("  LLM disabled — using rule-based cuts", file=sys.stderr)
             segments = _rule_based_fallback_segments(whisper_result["segments"])
             summary = ""
             low_confidence = False
             rationale = ""
+        else:
+            try:
+                if api_key or _llm.is_local():
+                    segments, summary, low_confidence, rationale = tighten(
+                        whisper_result["segments"], api_key
+                    )
+                else:
+                    segments = _rule_based_fallback_segments(whisper_result["segments"])
+                    summary = ""
+                    low_confidence = False
+                    rationale = ""
+            except Exception as e:
+                print(f"  Tighten failed ({e}), using rule-based fallback", file=sys.stderr)
+                segments = _rule_based_fallback_segments(whisper_result["segments"])
+                summary = ""
+                low_confidence = True
+                rationale = ""
 
         segments = apply_filler_cuts(segments, filler_sensitivity, preserve_manual=True)
 

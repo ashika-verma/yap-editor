@@ -170,7 +170,14 @@ function buildFilters(
     const wordCutsInRange: WordCut[] = [];
     for (const { seg } of group.segs) {
       for (const wc of (seg.wordCuts ?? [])) {
-        if (wc.startSec >= group.vStart && wc.endSec <= group.vEnd) {
+        // Include any cut that OVERLAPS the group range, not just fully-contained
+        // ones. Word-cut timestamps routinely extend past seg.endSec (Whisper word
+        // ends, segment trims), and the old "fully contained" test silently dropped
+        // those cuts — making the cut content reappear in the export. computeKeepSpans
+        // clamps each zone to [group.vStart, group.vEnd], so an overlapping cut is
+        // safely trimmed to the group rather than lost. (Matches the preview's
+        // VideoTimeline.computeKeepSpans, which clamps instead of dropping.)
+        if (wc.endSec > group.vStart && wc.startSec < group.vEnd) {
           wordCutsInRange.push(wc);
         }
       }
@@ -300,13 +307,15 @@ function buildFilters(
 }
 
 export async function POST(req: NextRequest) {
-  const { filePath, plan, segments: legacySegments } = (await req.json()) as {
+  const { filePath, plan, segments: legacySegments, customAudioPath } = (await req.json()) as {
     filePath: string;
     plan?: { version?: number; segments?: Segment[]; enhancedAudioPath?: string };
+    customAudioPath?: string | null;
     segments?: Segment[];
   };
   const segments = plan?.segments ?? legacySegments;
-  const enhancedAudioPath = plan?.enhancedAudioPath ?? null;
+  // customAudioPath (user re-uploaded audio e.g. from Adobe Podcast) takes priority
+  const enhancedAudioPath = customAudioPath ?? plan?.enhancedAudioPath ?? null;
 
   if (!filePath || !existsSync(filePath)) {
     return NextResponse.json({ error: "Source file not found" }, { status: 400 });
@@ -325,6 +334,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No segments selected" }, { status: 400 });
   }
 
+
   const videoDuration = Math.max(...segments.map((s) => s.endSec));
   const tmpDir = path.join(process.cwd(), "tmp");
   const outputId = randomUUID();
@@ -342,10 +352,13 @@ export async function POST(req: NextRequest) {
     if (stream) { sourceW = stream.width; sourceH = stream.height; }
   } catch { /* zoom hints will be skipped if probe fails */ }
 
-  // Only remove the rendered output. The source video is kept so post-export
-  // actions (thumbnail generation, re-export with different settings) still work.
+  const exportedAudioPath = path.join(tmpDir, `${outputId}_exported_audio.wav`);
+
+  // Keep rendered files for up to 1 hour so the Adobe Podcast round-trip can
+  // reference them. Source video is never deleted here.
   const cleanup = () => {
     try { unlinkSync(outputPath); } catch {}
+    try { unlinkSync(exportedAudioPath); } catch {}
   };
 
   try {
@@ -377,6 +390,13 @@ export async function POST(req: NextRequest) {
       outputPath,
     ], { maxBuffer: 100 * 1024 * 1024, timeout: 600_000 });
 
+    // Extract audio from the rendered cut for the Adobe Podcast round-trip.
+    try {
+      await execFileAsync(FFMPEG, [
+        "-y", "-i", outputPath, "-vn", "-ar", "48000", "-ac", "1", exportedAudioPath,
+      ], { timeout: 120_000 });
+    } catch { /* non-fatal — round-trip just won't be available */ }
+
     const stat = statSync(outputPath);
     const nodeStream = createReadStream(outputPath);
     const webStream = Readable.toWeb(nodeStream) as ReadableStream;
@@ -386,10 +406,13 @@ export async function POST(req: NextRequest) {
         "Content-Type": "video/mp4",
         "Content-Length": stat.size.toString(),
         "Content-Disposition": `attachment; filename="edited_${Date.now()}.mp4"`,
+        "X-Exported-Video-Path": outputPath,
+        "X-Exported-Audio-Path": existsSync(exportedAudioPath) ? exportedAudioPath : "",
       },
     });
 
-    setTimeout(cleanup, 10_000);
+    // Keep files for 1 hour for the Adobe round-trip, then clean up.
+    setTimeout(cleanup, 60 * 60 * 1000);
     return response;
   } catch (err: unknown) {
     const e = err as { message?: string; stderr?: string };

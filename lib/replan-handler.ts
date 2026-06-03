@@ -7,8 +7,7 @@ import { randomUUID } from "crypto";
 
 const execFileAsync = promisify(execFile);
 
-const POETRY_VENV = "/Users/ashikaverma/Library/Caches/pypoetry/virtualenvs/transcript-editor-py-pSpjchbs-py3.14";
-const PYTHON = path.join(POETRY_VENV, "bin", "python");
+const PYTHON = path.join(process.cwd(), ".venv", "bin", "python3");
 const REPLAN = path.join(process.cwd(), "scripts", "replan.py");
 
 async function runReplan(payload: unknown) {

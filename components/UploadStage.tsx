@@ -7,11 +7,13 @@ interface Props {
   uploadProgress: number;
   disableVision: boolean;
   onDisableVisionChange: (v: boolean) => void;
+  disableLLM: boolean;
+  onDisableLLMChange: (v: boolean) => void;
 }
 
 const ACCEPTED = ["video/mp4", "video/quicktime", "video/webm", "video/avi", "video/x-msvideo"];
 
-export function UploadStage({ onUpload, uploadProgress, disableVision, onDisableVisionChange }: Props) {
+export function UploadStage({ onUpload, uploadProgress, disableVision, onDisableVisionChange, disableLLM, onDisableLLMChange }: Props) {
   const [dragging, setDragging] = useState(false);
   const [selected, setSelected] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -189,40 +191,40 @@ export function UploadStage({ onUpload, uploadProgress, disableVision, onDisable
       </div>
 
       {/* Settings */}
-      <button
-        type="button"
-        onClick={() => onDisableVisionChange(!disableVision)}
-        className="flex items-center gap-2.5 text-xs transition-opacity"
-        style={{ color: "var(--muted-foreground)", opacity: uploading ? 0.4 : 1 }}
-        disabled={uploading}
-      >
-        <span
-          className="relative inline-flex items-center"
-          style={{
-            width: 32, height: 18,
-            borderRadius: 9,
-            background: disableVision ? "var(--primary)" : "var(--border)",
-            transition: "background 0.2s",
-            flexShrink: 0,
-          }}
-        >
-          <span
-            style={{
-              position: "absolute",
-              left: disableVision ? 16 : 2,
-              width: 14, height: 14,
-              borderRadius: "50%",
-              background: "white",
-              transition: "left 0.2s",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-            }}
-          />
-        </span>
-        Skip Gemma visual scan
-        <span style={{ color: "var(--muted-foreground)", opacity: 0.6 }}>
-          (faster, no visual tags)
-        </span>
-      </button>
+      <div className="flex flex-col items-center gap-2">
+        {[
+          { value: disableVision, onChange: onDisableVisionChange, label: "Skip Gemma visual scan", note: "faster, no visual tags" },
+          { value: disableLLM,    onChange: onDisableLLMChange,    label: "Skip Gemini/Gemma reasoning", note: "fastest, rule-based cuts only" },
+        ].map(({ value, onChange, label, note }) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => onChange(!value)}
+            className="flex items-center gap-2.5 text-xs transition-opacity"
+            style={{ color: "var(--muted-foreground)", opacity: uploading ? 0.4 : 1 }}
+            disabled={uploading}
+          >
+            <span
+              className="relative inline-flex items-center"
+              style={{
+                width: 32, height: 18, borderRadius: 9,
+                background: value ? "var(--primary)" : "var(--border)",
+                transition: "background 0.2s", flexShrink: 0,
+              }}
+            >
+              <span style={{
+                position: "absolute",
+                left: value ? 16 : 2,
+                width: 14, height: 14, borderRadius: "50%",
+                background: "white", transition: "left 0.2s",
+                boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+              }} />
+            </span>
+            {label}
+            <span style={{ color: "var(--muted-foreground)", opacity: 0.6 }}>({note})</span>
+          </button>
+        ))}
+      </div>
 
       {/* Feature list */}
       <div className="flex flex-wrap justify-center gap-3">

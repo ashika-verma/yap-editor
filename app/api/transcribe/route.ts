@@ -3,10 +3,11 @@ import { existsSync } from "fs";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
+import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 600;
+export const maxDuration = 1800;
 
 const execFileAsync = promisify(execFile);
 
@@ -15,7 +16,7 @@ const ORCHESTRATOR = path.join(process.cwd(), "scripts", "orchestrator.py");
 const WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo";
 
 export async function POST(req: NextRequest) {
-  const { filePath, fillerSensitivity = "balanced", disableVision = false } = await req.json();
+  const { filePath, fillerSensitivity = "balanced", disableVision = false, disableLLM = false } = await req.json();
   if (!filePath || !existsSync(filePath)) {
     return NextResponse.json({ error: "File not found" }, { status: 400 });
   }
@@ -24,6 +25,7 @@ export async function POST(req: NextRequest) {
 
   const orchestratorArgs = [ORCHESTRATOR, filePath, WHISPER_MODEL, fillerSensitivity, "--enhance"];
   if (disableVision) orchestratorArgs.push("--no-vision");
+  if (disableLLM) orchestratorArgs.push("--no-llm");
 
   try {
     const { stdout, stderr } = await execFileAsync(
@@ -31,7 +33,7 @@ export async function POST(req: NextRequest) {
       orchestratorArgs,
       {
         maxBuffer: 50 * 1024 * 1024,
-        timeout: 600_000,
+        timeout: 1_800_000,
         env: {
           ...process.env,
           GEMINI_API_KEY: process.env.GEMINI_API_KEY ?? "",
@@ -58,6 +60,32 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Mux enhanced audio into a preview MP4 so the browser preview uses the
+    // processed audio rather than the original track.
+    let previewVideoPath: string | null = null;
+    if (result.enhancedAudioPath && existsSync(result.enhancedAudioPath)) {
+      const previewPath = path.join(
+        path.dirname(filePath),
+        `${randomUUID()}_preview.mp4`,
+      );
+      try {
+        await execFileAsync("ffmpeg", [
+          "-y",
+          "-i", filePath,
+          "-i", result.enhancedAudioPath,
+          "-map", "0:v:0",
+          "-map", "1:a:0",
+          "-c:v", "copy",
+          "-c:a", "aac", "-b:a", "128k",
+          "-movflags", "+faststart",
+          previewPath,
+        ], { timeout: 120_000 });
+        previewVideoPath = previewPath;
+      } catch (e) {
+        console.warn("Preview mux failed, falling back to original:", e);
+      }
+    }
+
     const issues = result.linterIssues ?? [];
     const plan = {
       version: 1,
@@ -79,7 +107,7 @@ export async function POST(req: NextRequest) {
       enhancedAudioPath: result.enhancedAudioPath ?? null,
     };
 
-    return NextResponse.json({ plan });
+    return NextResponse.json({ plan, previewVideoPath });
   } catch (err: unknown) {
     const msg    = err instanceof Error ? err.message : String(err);
     const stderr = (err as { stderr?: string }).stderr ?? "";

@@ -199,7 +199,7 @@ def _openai_compat(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=1200) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
@@ -312,7 +312,7 @@ def _openai_compat_vision(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=1200) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body_str = e.read().decode(errors="replace")

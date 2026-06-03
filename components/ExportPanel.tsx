@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 function formatSeconds(sec: number) {
   const m = Math.floor(sec / 60);
@@ -14,10 +14,14 @@ interface Props {
   exportUrl: string | null;
   keptSegments: number;
   keptSeconds: number;
+  exportedAudioUrl?: string | null;
   onExport: () => void;
+  onReExport: () => void;
   onReset: () => void;
   onCopyTranscript: () => string;
   onGenerateThumbnails: (layout: "gap" | "split" | "editorial") => void;
+  onAudioUpload?: (file: File) => Promise<void>;
+  onRemux?: (audioPath: string) => Promise<void>;
   isThumbnailGenerating?: boolean;
 }
 
@@ -27,14 +31,22 @@ export function ExportPanel({
   exportUrl,
   keptSegments,
   keptSeconds,
+  exportedAudioUrl,
   onExport,
+  onReExport,
   onReset,
   onCopyTranscript,
   onGenerateThumbnails,
+  onAudioUpload,
+  onRemux,
   isThumbnailGenerating = false,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [thumbLayout, setThumbLayout] = useState<"gap" | "split" | "editorial">("editorial");
+  const [audioUploading, setAudioUploading] = useState(false);
+  const [remuxing, setRemuxing] = useState(false);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const adobeInputRef = useRef<HTMLInputElement>(null);
   const isExporting = stage === "exporting" && !exportUrl;
   const isDone = !!exportUrl;
 
@@ -71,7 +83,7 @@ export function ExportPanel({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">
             <a
               href={exportUrl!}
               download={`edited_${Date.now()}.mp4`}
@@ -85,6 +97,70 @@ export function ExportPanel({
               </svg>
               Download MP4
             </a>
+            {exportedAudioUrl && (
+              <>
+                <a
+                  href={`${exportedAudioUrl}&download=cut_audio.wav`}
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all"
+                  style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+                  onMouseEnter={(e) => { (e.currentTarget).style.color = "var(--foreground)"; }}
+                  onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                    <path d="M6.5 1v8M4 6.5l2.5 2.5 2.5-2.5M1.5 11.5h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Download for Adobe
+                </a>
+                <input
+                  ref={adobeInputRef}
+                  type="file"
+                  accept="audio/*,.wav,.mp3,.m4a,.aac"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file || !onAudioUpload || !onRemux) return;
+                    setRemuxing(true);
+                    try {
+                      await onAudioUpload(file);
+                      // onAudioUpload sets customAudioPath in parent; we need to re-fetch it
+                      // Instead, upload inline and call remux directly
+                      const uploadRes = await fetch("/api/upload-audio", {
+                        method: "POST",
+                        headers: { "Content-Type": file.type || "audio/wav" },
+                        body: file,
+                      });
+                      if (!uploadRes.ok) throw new Error("Upload failed");
+                      const { audioPath } = await uploadRes.json();
+                      await onRemux(audioPath);
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : "Remux failed");
+                    } finally {
+                      setRemuxing(false);
+                      e.target.value = "";
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => adobeInputRef.current?.click()}
+                  disabled={remuxing}
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all disabled:opacity-50"
+                  style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+                  onMouseEnter={(e) => { if (!remuxing) (e.currentTarget).style.color = "var(--foreground)"; }}
+                  onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
+                >
+                  {remuxing ? (
+                    <><div className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} /> Re-rendering…</>
+                  ) : (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                        <path d="M6.5 9.5V1.5M4 4l2.5-2.5L9 4M1.5 11.5h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                      Upload Adobe audio
+                    </>
+                  )}
+                </button>
+              </>
+            )}
             <button
               onClick={handleCopy}
               className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all"
@@ -149,6 +225,15 @@ export function ExportPanel({
                   Thumbnails
                 </>
               )}
+            </button>
+            <button
+              onClick={onReExport}
+              className="px-4 py-2.5 rounded-lg text-sm border transition-all"
+              style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+              onMouseEnter={(e) => { (e.currentTarget).style.color = "var(--foreground)"; }}
+              onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
+            >
+              Re-export
             </button>
             <button
               onClick={onReset}
@@ -236,6 +321,18 @@ export function ExportPanel({
     );
   }
 
+  const handleAudioFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onAudioUpload) return;
+    setAudioUploading(true);
+    try {
+      await onAudioUpload(file);
+    } finally {
+      setAudioUploading(false);
+      e.target.value = "";
+    }
+  };
+
   // Edit stage — ready to export
   return (
     <div
@@ -243,32 +340,34 @@ export function ExportPanel({
       style={{ borderColor: "var(--border)", background: "var(--card)" }}
     >
       <div>
-        <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
-          Ready to export
-        </p>
-        <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-          {keptSegments} segments · {formatSeconds(keptSeconds)} edited cut · ffmpeg will stitch them together
-        </p>
-      </div>
+        <div>
+          <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
+            Ready to export
+          </p>
+          <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+            {keptSegments} segments · {formatSeconds(keptSeconds)} edited cut · ffmpeg will stitch them together
+          </p>
+        </div>
 
-      <button
-        onClick={onExport}
-        disabled={keptSegments === 0}
-        className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
-        style={{
-          background: "var(--primary)",
-          color: "white",
-          fontFamily: "'Syne', sans-serif",
-          letterSpacing: "0.02em",
-        }}
-        onMouseEnter={(e) => { if (keptSegments > 0) (e.currentTarget).style.opacity = "0.85"; }}
-        onMouseLeave={(e) => { (e.currentTarget).style.opacity = "1"; }}
-      >
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <path d="M2 7h10M7 2l5 5-5 5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-        Export video
-      </button>
+        <button
+          onClick={onExport}
+          disabled={keptSegments === 0}
+          className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{
+            background: "var(--primary)",
+            color: "white",
+            fontFamily: "'Syne', sans-serif",
+            letterSpacing: "0.02em",
+          }}
+          onMouseEnter={(e) => { if (keptSegments > 0) (e.currentTarget).style.opacity = "0.85"; }}
+          onMouseLeave={(e) => { (e.currentTarget).style.opacity = "1"; }}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 7h10M7 2l5 5-5 5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Export video
+        </button>
+      </div>
     </div>
   );
 }

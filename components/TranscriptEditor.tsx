@@ -32,6 +32,7 @@ interface Props {
   onToggle: (index: number) => void;
   onToggleWordCut: (segmentIndex: number, wordIndex: number, range: boolean) => void;
   onCutRange: (segIdx: number, startWordIdx: number, endWordIdx: number) => void;
+  onRemoveSilenceCut: (segIdx: number, cutStartSec: number) => void;
   onResetToGemini: () => void;
   onToggleAll: (keep: boolean) => void;
   onSensitivityChange: (s: FillerSensitivity) => void;
@@ -123,6 +124,7 @@ export function TranscriptEditor({
   onToggle,
   onToggleWordCut,
   onCutRange,
+  onRemoveSilenceCut,
   onResetToGemini,
   onToggleAll,
   onSensitivityChange,
@@ -675,18 +677,66 @@ export function TranscriptEditor({
               >
                 {!seg.words?.length ? (
                   <span>{seg.text}</span>
-                ) : (
-                  seg.words.map((w, wi) => {
+                ) : (() => {
+                  // Silence cuts before the first word (leading silence in segment)
+                  const firstWordStart = seg.words![0].start ?? seg.startSec;
+                  const leadingSilences = (seg.wordCuts ?? []).filter(
+                    c => c.source === "silence" && c.endSec <= firstWordStart + 0.05,
+                  );
+                  return (<>
+                    {leadingSilences.map(sc => {
+                      const dur = (sc.endSec - sc.startSec).toFixed(1);
+                      return (
+                        <span
+                          key={`sil-lead-${sc.startSec}`}
+                          title={`${dur}s silence — click to restore`}
+                          onClick={() => onRemoveSilenceCut(si, sc.startSec)}
+                          style={{
+                            display: "inline-block",
+                            marginRight: 4,
+                            padding: "1px 5px",
+                            borderRadius: 4,
+                            fontSize: "0.72em",
+                            fontFamily: "'JetBrains Mono', monospace",
+                            background: "rgba(120,120,120,0.12)",
+                            color: "var(--muted-foreground)",
+                            border: "1px solid rgba(150,150,150,0.18)",
+                            cursor: "pointer",
+                            verticalAlign: "middle",
+                            userSelect: "none",
+                          }}
+                          onMouseEnter={e => {
+                            (e.currentTarget as HTMLSpanElement).style.background = "rgba(239,68,68,0.12)";
+                            (e.currentTarget as HTMLSpanElement).style.color = "#ef4444";
+                            (e.currentTarget as HTMLSpanElement).style.borderColor = "rgba(239,68,68,0.3)";
+                          }}
+                          onMouseLeave={e => {
+                            (e.currentTarget as HTMLSpanElement).style.background = "rgba(120,120,120,0.12)";
+                            (e.currentTarget as HTMLSpanElement).style.color = "var(--muted-foreground)";
+                            (e.currentTarget as HTMLSpanElement).style.borderColor = "rgba(150,150,150,0.18)";
+                          }}
+                        >
+                          [...{dur}s]
+                        </span>
+                      );
+                    })}
+                    {seg.words!.map((w, wi) => {
                     const cut      = findWordCut(seg, w, wi);
                     const isCut    = Boolean(cut);
                     const isManual = cut?.source === "manual";
                     const isTrim   = cut?.source === "trim";
                     const cutColor = isManual ? "#38bdf8" : isTrim ? "#ef4444" : "#f59e0b";
                     const cutColorAlpha = isManual ? "rgba(56,189,248,0.5)" : isTrim ? "rgba(239,68,68,0.5)" : "rgba(245,158,11,0.5)";
+
+                    // Find silence cuts sitting in the gap after this word
+                    const nextWordStart = wi < (seg.words?.length ?? 0) - 1 ? seg.words![wi + 1].start : seg.endSec;
+                    const silencesAfter = (seg.wordCuts ?? []).filter(
+                      c => c.source === "silence" &&
+                           c.startSec >= (w.end ?? w.start) - 0.05 &&
+                           c.endSec <= (nextWordStart ?? seg.endSec) + 0.05,
+                    );
+
                     return (
-                      // Space is a separate text node BEFORE the span so that
-                      // browser selection anchored in the space does not
-                      // include the preceding word span.
                       <Fragment key={wi}>
                         {wi > 0 && " "}
                         <span
@@ -717,10 +767,48 @@ export function TranscriptEditor({
                         >
                           {w.word}
                         </span>
+                        {silencesAfter.map(sc => {
+                          const dur = (sc.endSec - sc.startSec).toFixed(1);
+                          return (
+                            <span
+                              key={`sil-${sc.startSec}`}
+                              title={`${dur}s silence — click to restore`}
+                              onClick={() => onRemoveSilenceCut(si, sc.startSec)}
+                              style={{
+                                display: "inline-block",
+                                margin: "0 3px",
+                                padding: "1px 5px",
+                                borderRadius: 4,
+                                fontSize: "0.72em",
+                                fontFamily: "'JetBrains Mono', monospace",
+                                background: "rgba(120,120,120,0.12)",
+                                color: "var(--muted-foreground)",
+                                border: "1px solid rgba(150,150,150,0.18)",
+                                cursor: "pointer",
+                                verticalAlign: "middle",
+                                userSelect: "none",
+                                transition: "background 0.1s, color 0.1s",
+                              }}
+                              onMouseEnter={e => {
+                                (e.currentTarget as HTMLSpanElement).style.background = "rgba(239,68,68,0.12)";
+                                (e.currentTarget as HTMLSpanElement).style.color = "#ef4444";
+                                (e.currentTarget as HTMLSpanElement).style.borderColor = "rgba(239,68,68,0.3)";
+                              }}
+                              onMouseLeave={e => {
+                                (e.currentTarget as HTMLSpanElement).style.background = "rgba(120,120,120,0.12)";
+                                (e.currentTarget as HTMLSpanElement).style.color = "var(--muted-foreground)";
+                                (e.currentTarget as HTMLSpanElement).style.borderColor = "rgba(150,150,150,0.18)";
+                              }}
+                            >
+                              [...{dur}s]
+                            </span>
+                          );
+                        })}
                       </Fragment>
                     );
-                  })
-                )}
+                  })}
+                  </>);
+                })()}
               </div>
             );
           })}

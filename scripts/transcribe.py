@@ -27,6 +27,147 @@ def _extract_wav(video_path: str, wav_path: str) -> None:
     )
 
 
+def _detect_speech_regions(audio_path: str,
+                           min_silence_sec: float = 0.3,
+                           pad_sec: float = 0.1) -> list[float]:
+    """
+    Returns a flat [start, end, start, end, ...] list for mlx_whisper clip_timestamps.
+    Splits audio on silence gaps >= min_silence_sec so Whisper never sees silence,
+    which prevents hallucinations and gives cleaner word timestamps.
+    """
+    import librosa
+    import numpy as np
+
+    # librosa can't decode video containers — extract to WAV first
+    wav_for_vad = None
+    load_path = audio_path
+    ext = os.path.splitext(audio_path)[1].lower()
+    if ext not in (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_for_vad = tmp.name
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", audio_path, "-ac", "1", "-ar", "16000",
+             "-sample_fmt", "s16", wav_for_vad],
+            capture_output=True, check=True,
+        )
+        load_path = wav_for_vad
+
+    try:
+        y, sr = librosa.load(load_path, sr=16000, mono=True)
+    finally:
+        if wav_for_vad:
+            try: os.unlink(wav_for_vad)
+            except OSError: pass
+    duration = float(len(y) / sr)
+
+    frame_len = int(0.025 * sr)   # 25ms frames
+    hop       = int(0.010 * sr)   # 10ms hop
+    rms = librosa.feature.rms(y=y, frame_length=frame_len, hop_length=hop)[0]
+    rms_db = 20 * np.log10(rms + 1e-10)
+
+    # Adaptive threshold: noise floor (5th percentile) + 20 dB headroom.
+    # Clamp noise floor to -70 dBFS minimum — digitally silent sections drag
+    # the percentile to -120 dB, making the threshold so low that quiet room
+    # noise gets flagged as speech.
+    noise_floor = max(float(np.percentile(rms_db, 5)), -70.0)
+    threshold   = noise_floor + 20.0
+
+    frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+    is_speech   = rms_db > threshold
+
+    # Find silence runs that are long enough to split on
+    silence_gaps: list[tuple[float, float]] = []
+    in_silence   = False
+    sil_start    = 0.0
+    for t, speech in zip(frame_times, is_speech):
+        if not speech and not in_silence:
+            in_silence = True
+            sil_start  = float(t)
+        elif speech and in_silence:
+            in_silence = False
+            if float(t) - sil_start >= min_silence_sec:
+                silence_gaps.append((sil_start, float(t)))
+    if in_silence and (duration - sil_start) >= min_silence_sec:
+        silence_gaps.append((sil_start, duration))
+
+    if not silence_gaps:
+        print("[transcribe] VAD: no silence gaps found, processing full audio", file=sys.stderr)
+        return [0.0, duration]
+
+    # Speech regions = inverse of silence gaps, padded outward
+    regions: list[tuple[float, float]] = []
+    prev_end = 0.0
+    for sil_start, sil_end in silence_gaps:
+        if sil_start > prev_end:
+            regions.append((max(0.0, prev_end - pad_sec), min(duration, sil_start + pad_sec)))
+        prev_end = sil_end
+    if prev_end < duration:
+        regions.append((max(0.0, prev_end - pad_sec), duration))
+
+    # Merge overlapping padded regions
+    merged: list[list[float]] = [list(regions[0])]
+    for s, e in regions[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+
+    print(f"[transcribe] VAD: {len(merged)} speech regions "
+          f"({len(silence_gaps)} silence gaps ≥{min_silence_sec}s skipped)",
+          file=sys.stderr)
+    for s, e in merged:
+        print(f"  speech {s:.2f}s – {e:.2f}s", file=sys.stderr)
+
+    flat: list[float] = []
+    for s, e in merged:
+        flat.extend([round(s, 3), round(e, 3)])
+    return flat
+
+
+def _filter_hallucinated_words(segments: list[dict], audio, sr: int) -> list[dict]:
+    """
+    Drop words whose audio window has near-zero energy — Whisper hallucinations.
+    Also drops segments that end up with no words after filtering.
+    """
+    import numpy as np
+
+    rms_all = np.sqrt(np.mean(audio ** 2))
+    noise_floor_db = max(20 * np.log10(rms_all + 1e-10) - 30, -70.0)
+    threshold_db = noise_floor_db + 15.0  # 15 dB above noise floor = real speech
+
+    kept_segments = []
+    dropped_words = 0
+    for seg in segments:
+        words = seg.get("words", [])
+        clean_words = []
+        for w in words:
+            s = int(w.get("start", 0) * sr)
+            e = int(w.get("end", 0) * sr)
+            chunk = audio[s:e] if e > s else np.array([])
+            if len(chunk) == 0:
+                continue
+            rms_db = 20 * np.log10(np.sqrt(np.mean(chunk ** 2)) + 1e-10)
+            if rms_db >= threshold_db:
+                clean_words.append(w)
+            else:
+                dropped_words += 1
+        if not clean_words:
+            continue  # entire segment was hallucinated
+        seg = {**seg, "words": clean_words}
+        # Realign segment start/end to surviving word boundaries
+        seg["start"] = clean_words[0]["start"]
+        seg["end"]   = clean_words[-1]["end"]
+        seg["text"]  = " ".join(w["word"].strip() for w in clean_words)
+        kept_segments.append(seg)
+
+    if dropped_words:
+        print(f"[transcribe] energy filter: dropped {dropped_words} hallucinated words, "
+              f"{len(segments) - len(kept_segments)} empty segments removed",
+              file=sys.stderr)
+    return kept_segments
+
+
 def _forced_align_segments(wav_path: str, segments: list[dict]) -> list[dict]:
     """
     Replace Whisper word timestamps with WhisperX forced-alignment timestamps.
@@ -102,49 +243,82 @@ def main():
     audio_path = sys.argv[1]
     model = sys.argv[2] if len(sys.argv) > 2 else "mlx-community/whisper-large-v3-turbo"
 
-    old_stdout = sys.stdout
-    sys.stdout = sys.stderr
-    try:
-        result = mlx_whisper.transcribe(
-            audio_path,
-            path_or_hf_repo=model,
-            word_timestamps=True,
-            verbose=False,
-            language="en",
-            initial_prompt="Um, well, uh, like I said, he- he went to the store. A lot of- a lot of things happened.",
-            condition_on_previous_text=True,
-            compression_ratio_threshold=2.8,
-            no_speech_threshold=0.4,
-        )
-    finally:
-        sys.stdout = old_stdout
+    import librosa
+    import numpy as np
 
-    segments = []
-    for seg in result.get("segments", []):
-        words = [
-            {"word": w["word"].strip(), "start": round(w["start"], 3), "end": round(w["end"], 3)}
-            for w in seg.get("words", [])
-        ]
-        text = seg["text"].strip()
-        if not text:
-            continue
-        segments.append({
-            "start": round(seg["start"], 3),
-            "end":   round(seg["end"], 3),
-            "text":  text,
-            "words": words,
-        })
-
-    # Forced alignment: replace Whisper timestamps with phoneme-accurate ones
-    # Redirect stdout → stderr during alignment so WhisperX's internal print()
-    # calls ("Failed to align segment ...") don't pollute our JSON output.
-    old_stdout = sys.stdout
-    sys.stdout = sys.stderr
+    # Extract to 16kHz WAV once — reused for VAD, per-chunk transcription,
+    # energy filter, and forced alignment.
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         wav_path = tmp.name
     try:
-        print("[transcribe] extracting audio for forced alignment...", file=sys.stderr)
         _extract_wav(audio_path, wav_path)
+        audio, sr = librosa.load(wav_path, sr=16000, mono=True)
+    except Exception as e:
+        print(json.dumps({"error": f"Audio extraction failed: {e}"}))
+        sys.exit(1)
+
+    # Detect speech regions — split audio at silence gaps so each chunk is
+    # pure speech with no silent padding.
+    speech_regions = _detect_speech_regions(wav_path)
+    pairs = [(speech_regions[i], speech_regions[i + 1])
+             for i in range(0, len(speech_regions), 2)]
+
+    # Transcribe each speech chunk independently so every chunk gets fresh
+    # initial_prompt filler-word priming with condition_on_previous_text=False.
+    segments: list[dict] = []
+    detected_language = "en"
+
+    print(f"[transcribe] transcribing {len(pairs)} speech chunks...", file=sys.stderr)
+    old_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        for start_t, end_t in pairs:
+            chunk = audio[int(start_t * sr):int(end_t * sr)]
+            if len(chunk) < int(0.1 * sr):   # skip <100ms slivers
+                continue
+
+            result = mlx_whisper.transcribe(
+                chunk,
+                path_or_hf_repo=model,
+                word_timestamps=True,
+                verbose=False,
+                language="en",
+                initial_prompt="Um, well, uh, like I said, he- he went to the store. A lot of- a lot of things happened.",
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.8,
+                no_speech_threshold=0.4,
+                hallucination_silence_threshold=2.0,
+            )
+            detected_language = result.get("language", detected_language)
+
+            for seg in result.get("segments", []):
+                text = seg["text"].strip()
+                if not text:
+                    continue
+                words = [
+                    {
+                        "word":  w["word"].strip(),
+                        "start": round(w["start"] + start_t, 3),
+                        "end":   round(w["end"]   + start_t, 3),
+                    }
+                    for w in seg.get("words", [])
+                ]
+                segments.append({
+                    "start": round(seg["start"] + start_t, 3),
+                    "end":   round(seg["end"]   + start_t, 3),
+                    "text":  text,
+                    "words": words,
+                })
+    finally:
+        sys.stdout = old_stdout
+
+    # Energy filter: drop words whose audio window is near-silent (hallucinations).
+    segments = _filter_hallucinated_words(segments, audio, sr)
+
+    # Forced alignment: replace Whisper timestamps with phoneme-accurate ones.
+    old_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
         pre_align = [
             (w["word"], w["start"], w["end"])
             for seg in segments for w in seg.get("words", [])
@@ -154,7 +328,6 @@ def main():
             (w["word"], w["start"], w["end"])
             for seg in segments for w in seg.get("words", [])
         ]
-        # Log words where alignment shifted the boundary by >20ms
         diffs = [
             f"  {pre[0]!r}: end {pre[2]:.3f}→{post[2]:.3f} ({(post[2]-pre[2])*1000:+.0f}ms)"
             for pre, post in zip(pre_align, post_align)
@@ -178,7 +351,7 @@ def main():
 
     print(json.dumps({
         "segments": segments,
-        "language": result.get("language", "en"),
+        "language": detected_language,
     }))
 
 
