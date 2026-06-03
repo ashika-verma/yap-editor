@@ -413,6 +413,11 @@ export async function POST(req: NextRequest) {
       return null; // past all rendered content — skip
     }
 
+    // Total output duration — used to cap overlay end so it can't overshoot the video.
+    const totalOutputDuration = spanMap.length > 0
+      ? spanMap[spanMap.length - 1].outStart + (spanMap[spanMap.length - 1].srcEnd - spanMap[spanMap.length - 1].srcStart)
+      : 0;
+
     // Compute output positions for each overlay image.
     // inputIdx tracks the actual ffmpeg -i index; it only increments for overlays
     // that pass the srcToOut check, matching the overlayImageInputs array order.
@@ -426,11 +431,16 @@ export async function POST(req: NextRequest) {
       // edits inside the overlay window (filler cuts, silence removal) automatically
       // shrink/grow the overlay rather than drifting onto different content.
       const rawOutEnd = ov.sourceEndSec != null ? srcToOut(ov.sourceEndSec) : null;
-      const outEnd = rawOutEnd ?? outStart + ov.durationSec;
+      // If sourceEndSec is past the last span, srcToOut returns null — fall back to stored
+      // durationSec but cap to total output so we never overshoot the video length.
+      const outEnd = Math.min(
+        rawOutEnd ?? outStart + ov.durationSec,
+        totalOutputDuration,
+      );
       overlayOps.push({
         overlay: ov,
         outStart,
-        outEnd: Math.max(outStart + 0.5, outEnd), // floor at 0.5s
+        outEnd: Math.max(outStart + 0.05, outEnd), // tiny floor only to avoid zero-duration
         inputIdx: nextInputIdx++,
       });
     }
@@ -447,9 +457,12 @@ export async function POST(req: NextRequest) {
         const nextLabel = i < overlayOps.length - 1 ? `ov${i}` : "outv_final";
         // Scale to 60% of video width if sourceW known, else 720px fallback
         const scaledW = sourceW > 0 ? Math.round(sourceW * 0.6) : 720;
+        // gte(t,start)*lt(t,end) avoids ffmpeg's inclusive-upper-bound on between()
+        // which causes a stray last frame. -loop 1 on the input keeps the single
+        // JPEG frame alive for the full enable window without PTS drift.
         ovParts.push(`[${inputIdx}:v]scale=${scaledW}:-1[ovs${i}]`);
         ovParts.push(
-          `[${prevLabel}][ovs${i}]overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${outStart.toFixed(3)},${outEnd.toFixed(3)})'[${nextLabel}]`
+          `[${prevLabel}][ovs${i}]overlay=x=(W-w)/2:y=(H-h)/2:enable='gte(t,${outStart.toFixed(4)})*lt(t,${outEnd.toFixed(4)})'[${nextLabel}]`
         );
         prevLabel = nextLabel;
       }
@@ -457,7 +470,14 @@ export async function POST(req: NextRequest) {
       vMap = `[${prevLabel}]`;
     }
 
-    const overlayImageInputs = overlayOps.flatMap(({ overlay }) => ["-i", overlay.imagePath]);
+    // -framerate 25 -loop 1: treat the JPEG as a 25fps looping stream so ffmpeg
+    // has a stable PTS for every frame of the output — without this a single-frame
+    // image can present at PTS=0 and bleed through at unexpected times.
+    // -t outEnd+0.5: cap the loop at just past the overlay's enable window so the
+    // infinite stream terminates; without this ffmpeg spins forever draining it.
+    const overlayImageInputs = overlayOps.flatMap(({ overlay, outEnd }) => [
+      "-framerate", "25", "-loop", "1", "-t", (outEnd + 0.5).toFixed(3), "-i", overlay.imagePath,
+    ]);
     const ffmpegInputs = [
       "-i", filePath,
       ...(useEnhanced ? ["-i", enhancedAudioPath!] : []),

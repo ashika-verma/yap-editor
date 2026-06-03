@@ -716,19 +716,32 @@ function HomeInner() {
     setPlan((prev) => prev ? { ...prev, overlays: (prev.overlays ?? []).filter((o) => o.id !== id) } : prev);
   }, []);
 
+  const handleUpdateOverlayAnchor = useCallback((id: string, sourceAttachSec: number, sourceEndSec: number) => {
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        overlays: (prev.overlays ?? []).map((o) =>
+          o.id === id
+            ? { ...o, sourceAttachSec, sourceEndSec, durationSec: Math.round(Math.max(0.05, sourceEndSec - sourceAttachSec) * 10) / 10 }
+            : o,
+        ),
+      };
+    });
+  }, []);
+
   // Global paste handler: Ctrl/Cmd+V with an image → insert as overlay at current playhead.
   // Active whenever a plan is loaded (edit AND exporting stages) — not tied to "edit" only,
   // because the transcript editor (and its overlay markers) are visible during export too.
   useEffect(() => {
     if (!plan) return;
     const onPaste = async (e: ClipboardEvent) => {
+      // TranscriptEditor's onPaste calls e.preventDefault() then clears the DOM
+      // selection synchronously — so the selection check below would see an already-
+      // collapsed selection and always fire. Check defaultPrevented instead.
+      if (e.defaultPrevented) return;
       const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith("image/"));
       if (!item) return;
-      // If the user has words selected inside the transcript editor, its own
-      // onPaste handler already fired and handled it — don't double-fire here.
-      const sel = window.getSelection();
-      const transcriptEl = document.querySelector("[data-transcript-editor]");
-      if (sel && !sel.isCollapsed && transcriptEl?.contains(sel.anchorNode)) return;
       e.preventDefault();
       const blob = item.getAsFile();
       if (!blob) return;
@@ -1051,6 +1064,7 @@ function HomeInner() {
                 videoRef={videoRef}
                 onAddOverlay={handleAddOverlay}
                 onRemoveOverlay={handleRemoveOverlay}
+                onUpdateOverlayAnchor={handleUpdateOverlayAnchor}
                 resolvingOverlayIds={resolvingOverlayIds}
               />
             </div>

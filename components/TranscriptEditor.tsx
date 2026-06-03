@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useCallback, useEffect, Fragment } from "react";
+import { createPortal } from "react-dom";
 import {
   buildCleanTranscript,
   FillerSensitivity,
@@ -43,6 +44,7 @@ interface Props {
   videoRef?: React.RefObject<HTMLVideoElement | null>;
   onAddOverlay?: (sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => void;
   onRemoveOverlay?: (id: string) => void;
+  onUpdateOverlayAnchor?: (id: string, sourceAttachSec: number, sourceEndSec: number) => void;
   resolvingOverlayIds?: Set<string>;
 }
 
@@ -62,6 +64,31 @@ function formatSeconds(sec: number) {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// ── Overlay display helpers ────────────────────────────────────────────────────
+
+function computeOverlayDuration(ov: { sourceAttachSec: number; sourceEndSec?: number; durationSec: number }, segments: Segment[]): number {
+  if (ov.sourceEndSec == null) return ov.durationSec;
+  const { sourceAttachSec, sourceEndSec } = ov;
+  let total = 0;
+  for (const seg of segments) {
+    if (!seg.keep) continue;
+    const rangeStart = Math.max(seg.startSec, sourceAttachSec);
+    const rangeEnd   = Math.min(seg.endSec,   sourceEndSec);
+    if (rangeEnd <= rangeStart) continue;
+    const cuts = (seg.wordCuts ?? [])
+      .filter((wc) => wc.endSec > rangeStart && wc.startSec < rangeEnd)
+      .sort((a, b) => a.startSec - b.startSec);
+    let cursor = rangeStart;
+    for (const wc of cuts) {
+      const cs = Math.max(wc.startSec, rangeStart);
+      if (cs > cursor) total += cs - cursor;
+      cursor = Math.max(cursor, wc.endSec);
+    }
+    if (rangeEnd > cursor) total += rangeEnd - cursor;
+  }
+  return Math.round(total * 10) / 10;
 }
 
 // ── Word-level cut helpers ─────────────────────────────────────────────────────
@@ -139,6 +166,7 @@ export function TranscriptEditor({
   videoRef,
   onAddOverlay,
   onRemoveOverlay,
+  onUpdateOverlayAnchor,
   resolvingOverlayIds,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
@@ -148,6 +176,10 @@ export function TranscriptEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const [selPairs, setSelPairs]   = useState<{ segIdx: number; wordIdx: number }[] | null>(null);
   const [undoStack, setUndoStack] = useState<UndoRange[][]>([]);
+  const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  // Saves selection anchors before the file picker opens (picker clears the DOM selection)
+  const pendingOverlayFromSel = useRef<{ attachSec: number; endSec: number } | null>(null);
 
   // Video playback tracking
   const [activePos, setActivePos] = useState<{ seg: number; word: number } | null>(null);
@@ -221,12 +253,18 @@ export function TranscriptEditor({
       const pairs = getSelectionWordPairs(container, segments);
       if (pairs && pairs.length > 0) {
         setSelPairs(pairs);
+        // Capture selection rect for the floating tooltip
+        try {
+          const r = sel.getRangeAt(0).getBoundingClientRect();
+          setTooltipPos({ x: r.left + r.width / 2, y: r.top });
+        } catch { /* ignore */ }
         // Ensure the container has keyboard focus so Backspace/Cmd+Z fire here
         if (document.activeElement !== container) {
           container.focus({ preventScroll: true });
         }
       } else {
         setSelPairs(null);
+        setTooltipPos(null);
       }
     };
     document.addEventListener("selectionchange", handleSelChange);
@@ -248,31 +286,58 @@ export function TranscriptEditor({
   const riskyKept      = segments.filter((s) => s.keep && s.jobRisk);
   const riskyCount     = riskyKept.length;
 
+  const cutSelection = useCallback(() => {
+    if (!selPairs || selPairs.length === 0) return;
+    const bySegment = new Map<number, number[]>();
+    for (const { segIdx, wordIdx } of selPairs) {
+      if (!bySegment.has(segIdx)) bySegment.set(segIdx, []);
+      bySegment.get(segIdx)!.push(wordIdx);
+    }
+    const undoEntry: UndoRange[] = [];
+    for (const [segIdx, wordIndices] of bySegment) {
+      const min = Math.min(...wordIndices);
+      const max = Math.max(...wordIndices);
+      undoEntry.push({ segIdx, startWordIdx: min, endWordIdx: max });
+      onCutRange(segIdx, min, max);
+    }
+    setUndoStack((prev) => [...prev.slice(-19), undoEntry]);
+    setSelPairs(null);
+    setTooltipPos(null);
+    window.getSelection()?.removeAllRanges();
+  }, [selPairs, onCutRange]);
+
+  const repinOverlay = useCallback(() => {
+    if (!editingOverlayId || !selPairs || selPairs.length === 0) return;
+    const first = selPairs[0];
+    const last  = selPairs[selPairs.length - 1];
+    const attachWord = segments[first.segIdx]?.words?.[first.wordIdx];
+    const endWord    = segments[last.segIdx]?.words?.[last.wordIdx];
+    if (attachWord && onUpdateOverlayAnchor) {
+      onUpdateOverlayAnchor(editingOverlayId, attachWord.start, endWord?.end ?? attachWord.end);
+    }
+    setEditingOverlayId(null);
+    setSelPairs(null);
+    setTooltipPos(null);
+    window.getSelection()?.removeAllRanges();
+  }, [editingOverlayId, selPairs, segments, onUpdateOverlayAnchor]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (e.key === "Escape") {
         setSelPairs(null);
+        setTooltipPos(null);
+        setEditingOverlayId(null);
         window.getSelection()?.removeAllRanges();
+        return;
+      }
+      if (e.key === "Enter" && editingOverlayId && selPairs && selPairs.length > 0) {
+        e.preventDefault();
+        repinOverlay();
         return;
       }
       if (e.key === "Backspace" && selPairs && selPairs.length > 0) {
         e.preventDefault();
-        // Group selected words by segment, then create one spanning cut per segment
-        const bySegment = new Map<number, number[]>();
-        for (const { segIdx, wordIdx } of selPairs) {
-          if (!bySegment.has(segIdx)) bySegment.set(segIdx, []);
-          bySegment.get(segIdx)!.push(wordIdx);
-        }
-        const undoEntry: UndoRange[] = [];
-        for (const [segIdx, wordIndices] of bySegment) {
-          const min = Math.min(...wordIndices);
-          const max = Math.max(...wordIndices);
-          undoEntry.push({ segIdx, startWordIdx: min, endWordIdx: max });
-          onCutRange(segIdx, min, max);
-        }
-        setUndoStack((prev) => [...prev.slice(-19), undoEntry]);
-        setSelPairs(null);
-        window.getSelection()?.removeAllRanges();
+        cutSelection();
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey && undoStack.length > 0) {
@@ -285,10 +350,11 @@ export function TranscriptEditor({
         return;
       }
     },
-    [selPairs, undoStack, onCutRange],
+    [selPairs, undoStack, editingOverlayId, cutSelection, repinOverlay],
   );
 
   return (
+    <>
     <div className="space-y-6">
       {/* Summary card */}
       <div
@@ -526,8 +592,13 @@ export function TranscriptEditor({
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (!file) return;
-                  const attachSec = videoRef?.current?.currentTime ?? 0;
-                  onAddOverlay(attachSec, file);
+                  const pending = pendingOverlayFromSel.current;
+                  pendingOverlayFromSel.current = null;
+                  if (pending) {
+                    onAddOverlay(pending.attachSec, file, pending.endSec);
+                  } else {
+                    onAddOverlay(videoRef?.current?.currentTime ?? 0, file);
+                  }
                   e.target.value = "";
                 }}
               />
@@ -796,6 +867,12 @@ export function TranscriptEditor({
                            c.endSec <= (nextWordStart ?? seg.endSec) + 0.05,
                     );
 
+                    // Is this word covered by the overlay currently being edited?
+                    const editingOverlay = editingOverlayId ? overlays.find(o => o.id === editingOverlayId) : null;
+                    const inEditingOverlay = editingOverlay != null && !isCut &&
+                      w.start >= editingOverlay.sourceAttachSec &&
+                      (editingOverlay.sourceEndSec == null || w.end <= editingOverlay.sourceEndSec + 0.05);
+
                     return (
                       <Fragment key={wi}>
                         {wi > 0 && " "}
@@ -809,6 +886,7 @@ export function TranscriptEditor({
                               const video = videoRef?.current;
                               if (video && w.start != null) {
                                 video.currentTime = w.start;
+                                setActivePos({ seg: si, word: wi });
                               }
                             }
                           }}
@@ -817,12 +895,14 @@ export function TranscriptEditor({
                             textDecorationLine: isCut ? "line-through" : "none",
                             textDecorationColor: isCut ? cutColorAlpha : "transparent",
                             opacity: isCut ? 0.6 : 1,
-                            background: activePos?.seg === si && activePos?.word === wi && !isCut
+                            background: inEditingOverlay
+                              ? "rgba(245,158,11,0.22)"
+                              : activePos?.seg === si && activePos?.word === wi && !isCut
                               ? "rgba(20,184,166,0.28)"
                               : "transparent",
                             borderRadius: 3,
                             transition: "background 0.08s",
-                            cursor: isCut ? "pointer" : videoRef ? "pointer" : "text",
+                            cursor: isCut ? "pointer" : "text",
                           }}
                         >
                           {w.word}
@@ -869,25 +949,38 @@ export function TranscriptEditor({
                           .filter(ov => ov.sourceAttachSec >= w.start && ov.sourceAttachSec < (nextWordStart ?? seg.endSec))
                           .map(ov => {
                             const isResolving = resolvingOverlayIds?.has(ov.id);
+                            const displayDur  = computeOverlayDuration(ov, segments);
+                            const isEditing = editingOverlayId === ov.id;
                             return (
                               <span
                                 key={`ov-${ov.id}`}
                                 contentEditable={false}
-                                title={isResolving ? "AI is figuring out duration…" : `${ov.durationSec}s${ov.reasoning ? ` — ${ov.reasoning}` : ""} · click × to remove`}
+                                title={isEditing ? "Select words to repin · Enter to confirm · Esc to cancel" : isResolving ? "AI is figuring out duration…" : `${displayDur}s${ov.reasoning ? ` — ${ov.reasoning}` : ""} · click to repin · click × to remove`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!isResolving) {
+                                    setEditingOverlayId(isEditing ? null : ov.id);
+                                    setSelPairs(null);
+                                    window.getSelection()?.removeAllRanges();
+                                  }
+                                }}
                                 style={{
                                   display: "inline-block",
                                   margin: "0 4px",
                                   verticalAlign: "middle",
                                   userSelect: "none",
                                   position: "relative",
-                                  cursor: "default",
+                                  cursor: isResolving ? "default" : "pointer",
+                                  outline: isEditing ? "2px solid rgba(56,189,248,0.8)" : "none",
+                                  outlineOffset: 2,
+                                  borderRadius: 5,
                                 }}
                               >
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                   src={ov.imageUrl}
                                   alt="overlay"
-                                  style={{ height: 28, width: "auto", maxWidth: 56, borderRadius: 4, border: `1.5px solid ${isResolving ? "rgba(245,158,11,0.7)" : "rgba(139,92,246,0.6)"}`, objectFit: "cover", display: "block", opacity: isResolving ? 0.7 : 1 }}
+                                  style={{ height: 28, width: "auto", maxWidth: 56, borderRadius: 4, border: `1.5px solid ${isEditing ? "rgba(56,189,248,0.9)" : isResolving ? "rgba(245,158,11,0.7)" : "rgba(139,92,246,0.6)"}`, objectFit: "cover", display: "block", opacity: isResolving ? 0.7 : 1 }}
                                 />
                                 {/* Duration chip */}
                                 <span style={{
@@ -904,7 +997,7 @@ export function TranscriptEditor({
                                   lineHeight: "11px",
                                   pointerEvents: "none",
                                 }}>
-                                  {isResolving ? "…" : `${ov.durationSec.toFixed(1)}s`}
+                                  {isResolving ? "…" : `${displayDur.toFixed(1)}s`}
                                 </span>
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onRemoveOverlay?.(ov.id); }}
@@ -947,7 +1040,23 @@ export function TranscriptEditor({
           className="px-5 py-3 flex items-center justify-between border-t"
           style={{ borderColor: "var(--border)", background: "var(--card)" }}
         >
-          {selPairs && selPairs.length > 0 ? (
+          {editingOverlayId ? (
+            selPairs && selPairs.length > 0 ? (
+              <span className="text-xs" style={{ color: "#38bdf8" }}>
+                {selPairs.length} word{selPairs.length !== 1 ? "s" : ""} selected
+                <span style={{ color: "var(--muted-foreground)" }}>
+                  {" "}· <span style={{ color: "#38bdf8" }}>Enter</span> to repin overlay · Esc to cancel
+                </span>
+              </span>
+            ) : (
+              <span className="text-xs" style={{ color: "rgba(245,158,11,0.9)" }}>
+                Editing overlay span
+                <span style={{ color: "var(--muted-foreground)" }}>
+                  {" "}· select words to repin · Esc to cancel
+                </span>
+              </span>
+            )
+          ) : selPairs && selPairs.length > 0 ? (
             <span className="text-xs" style={{ color: "#38bdf8" }}>
               {selPairs.length} word{selPairs.length !== 1 ? "s" : ""} selected
               <span style={{ color: "var(--muted-foreground)" }}>
@@ -968,6 +1077,107 @@ export function TranscriptEditor({
         </div>
       </div>
     </div>
+
+    {/* Floating selection toolbar — rendered into body so it clears the transcript border */}
+    {tooltipPos && selPairs && selPairs.length > 0 && typeof window !== "undefined" && createPortal(
+      <div
+        style={{
+          position: "fixed",
+          left: tooltipPos.x,
+          top: tooltipPos.y - 12,
+          transform: "translate(-50%, -100%)",
+          zIndex: 9999,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          background: "rgba(15,15,20,0.97)",
+          border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: 10,
+          padding: "6px 8px",
+          boxShadow: "0 6px 24px rgba(0,0,0,0.6)",
+          userSelect: "none",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <button
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={cutSelection}
+          style={{
+            display: "flex", alignItems: "center", gap: 5,
+            padding: "5px 10px", borderRadius: 7, border: "none",
+            background: "rgba(239,68,68,0.15)", color: "#fca5a5",
+            cursor: "pointer", fontSize: 13, fontFamily: "inherit",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.28)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.15)"; }}
+        >
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, opacity: 0.7 }}>⌫</span>
+          Cut
+        </button>
+        {onAddOverlay && !editingOverlayId && (
+          <>
+            <div style={{ width: 1, height: 16, background: "rgba(255,255,255,0.1)" }} />
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const first = selPairs[0];
+                const last  = selPairs[selPairs.length - 1];
+                const attachWord = segments[first.segIdx]?.words?.[first.wordIdx];
+                const endWord    = segments[last.segIdx]?.words?.[last.wordIdx];
+                if (attachWord) {
+                  pendingOverlayFromSel.current = { attachSec: attachWord.start, endSec: endWord?.end ?? attachWord.end };
+                }
+                fileInputRef.current?.click();
+              }}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                padding: "5px 10px", borderRadius: 7, border: "none",
+                background: "rgba(139,92,246,0.15)", color: "#c4b5fd",
+                cursor: "pointer", fontSize: 13, fontFamily: "inherit",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(139,92,246,0.28)"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(139,92,246,0.15)"; }}
+            >
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, opacity: 0.7 }}>⌘V</span>
+              Pin graphic
+            </button>
+          </>
+        )}
+        {editingOverlayId && (
+          <>
+            <div style={{ width: 1, height: 16, background: "rgba(255,255,255,0.1)" }} />
+            <button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={repinOverlay}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                padding: "5px 10px", borderRadius: 7, border: "none",
+                background: "rgba(56,189,248,0.15)", color: "#7dd3fc",
+                cursor: "pointer", fontSize: 13, fontFamily: "inherit",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(56,189,248,0.28)"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(56,189,248,0.15)"; }}
+            >
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, opacity: 0.7 }}>↵</span>
+              Repin overlay
+            </button>
+          </>
+        )}
+        {/* Downward caret */}
+        <span style={{
+          position: "absolute",
+          bottom: -5,
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: 0, height: 0,
+          borderLeft: "5px solid transparent",
+          borderRight: "5px solid transparent",
+          borderTop: "5px solid rgba(15,15,20,0.97)",
+        }} />
+      </div>,
+      document.body,
+    )}
+    </>
   );
 }
 
