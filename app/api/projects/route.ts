@@ -75,6 +75,25 @@ export async function POST(req: NextRequest) {
     copyFileSync(enhancedSrc, savedEnhancedPath);
   }
 
+  // Copy overlay images and rewrite paths so they survive tmp/ cleanup
+  const savedOverlays = (plan.overlays ?? []).map(
+    (ov: { id: string; imagePath: string; imageUrl: string; [k: string]: unknown }, idx: number) => {
+      if (!ov.imagePath || !existsSync(ov.imagePath)) return ov;
+      const ext2 = path.extname(ov.imagePath) || ".png";
+      const destPath = path.join(projectDir, `overlay_${idx}${ext2}`);
+      try {
+        copyFileSync(ov.imagePath, destPath);
+        return {
+          ...ov,
+          imagePath: destPath,
+          imageUrl: `/api/video?path=${encodeURIComponent(destPath)}`,
+        };
+      } catch {
+        return ov;
+      }
+    }
+  );
+
   // Extract thumbnail (best-effort)
   const thumbnailPath = path.join(projectDir, "thumbnail.jpg");
   let hasThumbnail = false;
@@ -94,6 +113,7 @@ export async function POST(req: NextRequest) {
   const savedPlan = {
     ...plan,
     enhancedAudioPath: savedEnhancedPath,
+    overlays: savedOverlays,
   };
   writeFileSync(path.join(projectDir, "plan.json"), JSON.stringify(savedPlan), "utf8");
 

@@ -7,6 +7,7 @@ import {
   JudgeItem,
   JudgeResult,
   NarrativeAnalysis,
+  Overlay,
   Segment,
   WordCut,
   WordTimestamp,
@@ -15,6 +16,7 @@ import {
 
 interface Props {
   segments: Segment[];
+  overlays?: Overlay[];
   summary: string;
   rationale?: string;
   lowConfidence?: boolean;
@@ -39,6 +41,9 @@ interface Props {
   onJudge?: () => void;
   onRefine?: () => void;
   videoRef?: React.RefObject<HTMLVideoElement | null>;
+  onAddOverlay?: (sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => void;
+  onRemoveOverlay?: (id: string) => void;
+  resolvingOverlayIds?: Set<string>;
 }
 
 const DROP_REASON_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -107,6 +112,7 @@ type UndoRange = { segIdx: number; startWordIdx: number; endWordIdx: number };
 
 export function TranscriptEditor({
   segments,
+  overlays = [],
   summary,
   rationale,
   lowConfidence,
@@ -131,9 +137,13 @@ export function TranscriptEditor({
   onJudge,
   onRefine,
   videoRef,
+  onAddOverlay,
+  onRemoveOverlay,
+  resolvingOverlayIds,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
   const [copied, setCopied]       = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [selPairs, setSelPairs]   = useState<{ segIdx: number; wordIdx: number }[] | null>(null);
@@ -506,6 +516,36 @@ export function TranscriptEditor({
               </>
             )}
           </button>
+          {onAddOverlay && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const attachSec = videoRef?.current?.currentTime ?? 0;
+                  onAddOverlay(attachSec, file);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5"
+                style={{ borderColor: "rgba(139,92,246,0.35)", color: "#8b5cf6", background: "rgba(139,92,246,0.06)" }}
+                title="Insert graphic at current playhead position (or Ctrl+V to paste)"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <rect x="1" y="1" width="8" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.2"/>
+                  <circle cx="3.5" cy="3.5" r="0.8" fill="currentColor"/>
+                  <path d="M1 7l2.5-2.5L5 6l2-2.5 2 3.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Add graphic
+              </button>
+            </>
+          )}
           <button
             onClick={onResetToGemini}
             className="text-xs px-3 py-1.5 rounded-lg border transition-colors flex items-center gap-1.5"
@@ -608,6 +648,26 @@ export function TranscriptEditor({
           ref={containerRef}
           tabIndex={0}
           onKeyDown={handleKeyDown}
+          onPaste={(e) => {
+            if (!selPairs?.length || !onAddOverlay) return;
+            const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith("image/"));
+            if (!item) return;
+            e.preventDefault();
+            const blob = item.getAsFile();
+            if (!blob) return;
+            // Compute timestamps from the selection boundary words
+            const first = selPairs[0];
+            const last  = selPairs[selPairs.length - 1];
+            const attachWord = segments[first.segIdx]?.words?.[first.wordIdx];
+            const endWord    = segments[last.segIdx]?.words?.[last.wordIdx];
+            if (!attachWord) return;
+            const sourceAttachSec = attachWord.start;
+            const sourceEndSec    = endWord?.end ?? attachWord.end;
+            onAddOverlay(sourceAttachSec, blob, sourceEndSec);
+            // Clear selection
+            setSelPairs(null);
+            window.getSelection()?.removeAllRanges();
+          }}
           data-transcript-editor
           className="focus:outline-none"
           style={{
@@ -804,6 +864,74 @@ export function TranscriptEditor({
                             </span>
                           );
                         })}
+                        {/* Overlay markers: show thumbnail badge after the word at the attach point */}
+                        {overlays
+                          .filter(ov => ov.sourceAttachSec >= w.start && ov.sourceAttachSec < (nextWordStart ?? seg.endSec))
+                          .map(ov => {
+                            const isResolving = resolvingOverlayIds?.has(ov.id);
+                            return (
+                              <span
+                                key={`ov-${ov.id}`}
+                                contentEditable={false}
+                                title={isResolving ? "AI is figuring out duration…" : `${ov.durationSec}s${ov.reasoning ? ` — ${ov.reasoning}` : ""} · click × to remove`}
+                                style={{
+                                  display: "inline-block",
+                                  margin: "0 4px",
+                                  verticalAlign: "middle",
+                                  userSelect: "none",
+                                  position: "relative",
+                                  cursor: "default",
+                                }}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={ov.imageUrl}
+                                  alt="overlay"
+                                  style={{ height: 28, width: "auto", maxWidth: 56, borderRadius: 4, border: `1.5px solid ${isResolving ? "rgba(245,158,11,0.7)" : "rgba(139,92,246,0.6)"}`, objectFit: "cover", display: "block", opacity: isResolving ? 0.7 : 1 }}
+                                />
+                                {/* Duration chip */}
+                                <span style={{
+                                  position: "absolute",
+                                  bottom: -1,
+                                  left: 0,
+                                  right: 0,
+                                  textAlign: "center",
+                                  fontSize: 7,
+                                  fontFamily: "'JetBrains Mono', monospace",
+                                  color: "white",
+                                  background: isResolving ? "rgba(245,158,11,0.85)" : "rgba(139,92,246,0.85)",
+                                  borderRadius: "0 0 3px 3px",
+                                  lineHeight: "11px",
+                                  pointerEvents: "none",
+                                }}>
+                                  {isResolving ? "…" : `${ov.durationSec.toFixed(1)}s`}
+                                </span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onRemoveOverlay?.(ov.id); }}
+                                  style={{
+                                    position: "absolute",
+                                    top: -5,
+                                    right: -5,
+                                    width: 14,
+                                    height: 14,
+                                    borderRadius: "50%",
+                                    background: "#ef4444",
+                                    color: "white",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    fontSize: 9,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    lineHeight: 1,
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            );
+                          })
+                        }
                       </Fragment>
                     );
                   })}
@@ -823,7 +951,7 @@ export function TranscriptEditor({
             <span className="text-xs" style={{ color: "#38bdf8" }}>
               {selPairs.length} word{selPairs.length !== 1 ? "s" : ""} selected
               <span style={{ color: "var(--muted-foreground)" }}>
-                {" "}· Backspace to cut · Esc to clear
+                {" "}· Backspace to cut · {onAddOverlay ? "⌘V to pin graphic · " : ""}Esc to clear
               </span>
             </span>
           ) : (

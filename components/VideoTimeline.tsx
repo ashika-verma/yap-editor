@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
-import { Segment, WordCut } from "@/lib/editPlan";
+import { Overlay, Segment, WordCut } from "@/lib/editPlan";
 
 interface RangeCut {
   segIdx: number;
@@ -11,6 +11,7 @@ interface RangeCut {
 
 interface Props {
   segments: Segment[];
+  overlays?: Overlay[];
   videoUrl: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   onTrim: (index: number, newStart: number, newEnd: number) => void;
@@ -101,7 +102,7 @@ function formatTime(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}.${ms}`;
 }
 
-export function VideoTimeline({ segments, videoUrl, videoRef, onTrim, onRangeCut }: Props) {
+export function VideoTimeline({ segments, overlays = [], videoUrl, videoRef, onTrim, onRangeCut }: Props) {
   const timelineRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -375,6 +376,22 @@ export function VideoTimeline({ segments, videoUrl, videoRef, onTrim, onRangeCut
   const playheadPct = toScreenPct(playFrac);
   const visibleRange = 1 / zoom;
 
+  // Precompute overlay positions. Duration is recomputed from sourceEndSec when
+  // present so the timeline marker tracks edits automatically.
+  const overlayMarkers = overlays.map((ov) => {
+    const outStart = sourceToOutput(ov.sourceAttachSec, outputSpans);
+    const outEnd = ov.sourceEndSec != null
+      ? sourceToOutput(ov.sourceEndSec, outputSpans)
+      : outStart + ov.durationSec;
+    return { ov, outStart, outEnd };
+  });
+
+  // Which overlays are active at the current output time?
+  const outputCurrentTime = playFrac * outputDuration;
+  const activeOverlays = overlayMarkers
+    .filter(({ outStart, outEnd }) => outputCurrentTime >= outStart && outputCurrentTime < outEnd)
+    .map(({ ov }) => ov);
+
   // Time ruler: 5 ticks spaced evenly across the visible window
   const rulerTicks = Array.from({ length: 5 }, (_, i) => {
     const frac = viewStart + (i / 4) * visibleRange;
@@ -390,10 +407,33 @@ export function VideoTimeline({ segments, videoUrl, videoRef, onTrim, onRangeCut
       {/* Video player */}
       <div className="relative rounded-xl overflow-hidden" style={{ aspectRatio: "16/9", background: "#000" }}>
         <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" />
+
+        {/* Live overlay preview: shows the graphic composited over the video */}
+        {activeOverlays.map((ov) => (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={ov.id}
+            src={ov.imageUrl}
+            alt="overlay preview"
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              maxWidth: "60%",
+              maxHeight: "70%",
+              objectFit: "contain",
+              borderRadius: 6,
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          />
+        ))}
+
         <button
           onClick={handlePlayPause}
           className="absolute inset-0 flex items-center justify-center"
-          style={{ background: isPlaying ? "transparent" : "rgba(0,0,0,0.28)" }}
+          style={{ background: isPlaying ? "transparent" : "rgba(0,0,0,0.28)", zIndex: 10 }}
         >
           {!isPlaying && (
             <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: "rgba(255,255,255,0.12)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.2)" }}>
@@ -477,6 +517,42 @@ export function VideoTimeline({ segments, videoUrl, videoRef, onTrim, onRangeCut
               }}
             />
           )}
+
+          {/* Overlay markers */}
+          {overlayMarkers.map(({ ov, outStart, outEnd }) => {
+            const pct    = toScreenPct(outStart / outputDuration);
+            const endPct = toScreenPct(outEnd   / outputDuration);
+            if (endPct <= 0 || pct >= 100) return null;
+            return (
+              <React.Fragment key={ov.id}>
+                {/* Duration band */}
+                <div
+                  className="absolute top-0 bottom-0 pointer-events-none z-10"
+                  style={{
+                    left: `${Math.max(0, pct)}%`,
+                    width: `${Math.min(100, endPct) - Math.max(0, pct)}%`,
+                    background: "rgba(139,92,246,0.18)",
+                    borderLeft: pct >= 0 ? "2px solid rgba(139,92,246,0.8)" : "none",
+                    borderRight: endPct <= 100 ? "2px solid rgba(139,92,246,0.5)" : "none",
+                  }}
+                />
+                {/* Thumbnail pip above the band */}
+                {pct >= 0 && pct <= 100 && (
+                  <div
+                    className="absolute z-20 pointer-events-none"
+                    style={{ left: `${pct}%`, top: 0, transform: "translateX(-50%)" }}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={ov.imageUrl}
+                      alt=""
+                      style={{ width: 28, height: 18, objectFit: "cover", borderRadius: 3, border: "1.5px solid rgba(139,92,246,0.8)", display: "block" }}
+                    />
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
 
           {/* Playhead */}
           {playheadPct >= -1 && playheadPct <= 101 && (

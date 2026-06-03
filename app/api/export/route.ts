@@ -47,6 +47,19 @@ interface Segment {
   zoomHint?: ZoomHint | null;
 }
 
+interface Overlay {
+  id: string;
+  sourceAttachSec: number;
+  sourceEndSec?: number | null;
+  durationSec: number;
+  imagePath: string;
+  imageUrl?: string;
+  label?: string;
+}
+
+// Maps rendered spans: source [srcStart,srcEnd) → output start time
+interface SpanMap { srcStart: number; srcEnd: number; outStart: number; }
+
 const WORD_CUT_PAD_PRE  = 0.003; // pre-cut margin before renderStartSec
 const WORD_CUT_PAD_POST = 0.030; // post-cut margin after renderEndSec
 const MIN_SPAN        = 0.15;  // minimum keep-span duration — anything shorter is inaudible
@@ -133,11 +146,12 @@ function buildFilters(
   sourceW = 0,
   sourceH = 0,
   audioInputIdx = 0,
-): { filterComplex: string; vMap: string; aMap: string; spanCount: number } {
+): { filterComplex: string; vMap: string; aMap: string; spanCount: number; spanMap: SpanMap[] } {
   const vParts: string[] = [];
   const aParts: string[] = [];
   const vOutputs: string[] = [];
   const aOutputs: string[] = [];
+  const spanMap: SpanMap[] = [];
 
   let spanIdx = 0;
   let videoOutputSec = 0; // cumulative output video duration
@@ -283,13 +297,17 @@ function buildFilters(
       aParts.push(`[${audioInputIdx}:a]${aChain.join(",")}[a${spanIdx}]`);
       aOutputs.push(`[a${spanIdx}]`);
 
+      // Record source→output mapping for overlay positioning (built in the same
+      // loop so it can't drift from what ffmpeg actually renders)
+      spanMap.push({ srcStart: span.startSec, srcEnd: span.endSec, outStart: videoOutputSec });
+
       videoOutputSec += spanVideoDur;
       spanIdx++;
     }
   }
 
   if (spanIdx === 0) {
-    return { filterComplex: "", vMap: "", aMap: "", spanCount: 0 };
+    return { filterComplex: "", vMap: "", aMap: "", spanCount: 0, spanMap: [] };
   }
 
   const n = spanIdx;
@@ -303,17 +321,19 @@ function buildFilters(
     vMap: "[outv]",
     aMap: "[outa]",
     spanCount: n,
+    spanMap,
   };
 }
 
 export async function POST(req: NextRequest) {
   const { filePath, plan, segments: legacySegments, customAudioPath } = (await req.json()) as {
     filePath: string;
-    plan?: { version?: number; segments?: Segment[]; enhancedAudioPath?: string };
+    plan?: { version?: number; segments?: Segment[]; enhancedAudioPath?: string; overlays?: Overlay[] };
     customAudioPath?: string | null;
     segments?: Segment[];
   };
   const segments = plan?.segments ?? legacySegments;
+  const overlays = (plan?.overlays ?? []).filter((o) => existsSync(o.imagePath));
   // customAudioPath (user re-uploaded audio e.g. from Adobe Podcast) takes priority
   const enhancedAudioPath = customAudioPath ?? plan?.enhancedAudioPath ?? null;
 
@@ -364,7 +384,7 @@ export async function POST(req: NextRequest) {
   try {
     const useEnhanced = enhancedAudioPath && existsSync(enhancedAudioPath);
     const audioInputIdx = useEnhanced ? 1 : 0;
-    const { filterComplex, vMap, aMap, spanCount } = buildFilters(
+    const { filterComplex: baseFilter, vMap: baseVMap, aMap, spanCount, spanMap } = buildFilters(
       keptSegments, segments, videoDuration, sourceW, sourceH, audioInputIdx
     );
 
@@ -372,9 +392,77 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No renderable spans after processing" }, { status: 400 });
     }
 
-    const ffmpegInputs = useEnhanced
-      ? ["-i", filePath, "-i", enhancedAudioPath!]
-      : ["-i", filePath];
+    // ── Overlay compositing ──────────────────────────────────────────────────
+    // Image inputs start after: [0]=video, [1]=enhanced audio (optional)
+    const overlayInputBase = useEnhanced ? 2 : 1;
+
+    // Map each overlay's source attach time to its output time.
+    // Walk spans in order; if the attach time falls in a cut zone, snap to the
+    // next span's output start. If no span follows, skip the overlay.
+    function srcToOut(srcT: number): number | null {
+      for (const span of spanMap) {
+        if (srcT < span.srcStart) {
+          // srcT is before this span (in a cut zone preceding it) — snap here
+          return span.outStart;
+        }
+        if (srcT < span.srcEnd) {
+          // srcT is inside this span
+          return span.outStart + (srcT - span.srcStart);
+        }
+      }
+      return null; // past all rendered content — skip
+    }
+
+    // Compute output positions for each overlay image.
+    // inputIdx tracks the actual ffmpeg -i index; it only increments for overlays
+    // that pass the srcToOut check, matching the overlayImageInputs array order.
+    type OverlayOp = { overlay: Overlay; outStart: number; outEnd: number; inputIdx: number };
+    const overlayOps: OverlayOp[] = [];
+    let nextInputIdx = overlayInputBase;
+    for (const ov of overlays) {
+      const outStart = srcToOut(ov.sourceAttachSec);
+      if (outStart === null) continue; // attachment point past end — skip input too
+      // If sourceEndSec is set, recompute duration from the current span map so
+      // edits inside the overlay window (filler cuts, silence removal) automatically
+      // shrink/grow the overlay rather than drifting onto different content.
+      const rawOutEnd = ov.sourceEndSec != null ? srcToOut(ov.sourceEndSec) : null;
+      const outEnd = rawOutEnd ?? outStart + ov.durationSec;
+      overlayOps.push({
+        overlay: ov,
+        outStart,
+        outEnd: Math.max(outStart + 0.5, outEnd), // floor at 0.5s
+        inputIdx: nextInputIdx++,
+      });
+    }
+
+    // Build filter_complex: append overlay chain after concat if any overlays
+    let filterComplex = baseFilter;
+    let vMap = baseVMap;
+
+    if (overlayOps.length > 0) {
+      const ovParts: string[] = [];
+      let prevLabel = "outv";
+      for (let i = 0; i < overlayOps.length; i++) {
+        const { outStart, outEnd, inputIdx } = overlayOps[i];
+        const nextLabel = i < overlayOps.length - 1 ? `ov${i}` : "outv_final";
+        // Scale to 60% of video width if sourceW known, else 720px fallback
+        const scaledW = sourceW > 0 ? Math.round(sourceW * 0.6) : 720;
+        ovParts.push(`[${inputIdx}:v]scale=${scaledW}:-1[ovs${i}]`);
+        ovParts.push(
+          `[${prevLabel}][ovs${i}]overlay=x=(W-w)/2:y=(H-h)/2:enable='between(t,${outStart.toFixed(3)},${outEnd.toFixed(3)})'[${nextLabel}]`
+        );
+        prevLabel = nextLabel;
+      }
+      filterComplex = baseFilter + ";" + ovParts.join(";");
+      vMap = `[${prevLabel}]`;
+    }
+
+    const overlayImageInputs = overlayOps.flatMap(({ overlay }) => ["-i", overlay.imagePath]);
+    const ffmpegInputs = [
+      "-i", filePath,
+      ...(useEnhanced ? ["-i", enhancedAudioPath!] : []),
+      ...overlayImageInputs,
+    ];
 
     await execFileAsync(FFMPEG, [
       ...ffmpegInputs,

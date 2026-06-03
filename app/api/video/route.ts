@@ -11,6 +11,10 @@ function mimeType(filePath: string): string {
   if (ext === ".wav") return "audio/wav";
   if (ext === ".mp3") return "audio/mpeg";
   if (ext === ".m4a" || ext === ".aac") return "audio/aac";
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
   return "video/mp4";
 }
 

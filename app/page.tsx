@@ -13,6 +13,7 @@ import {
   EditPlan,
   FillerSensitivity,
   JudgeResult,
+  Overlay,
   WordCut,
   wordCutId,
 } from "@/lib/editPlan";
@@ -61,9 +62,14 @@ function HomeInner() {
   const [customAudioName, setCustomAudioName] = useState<string | null>(null);
   const [exportedVideoPath, setExportedVideoPath] = useState<string | null>(null);
   const [exportedAudioPath, setExportedAudioPath] = useState<string | null>(null);
+  const [resolvingOverlayIds, setResolvingOverlayIds] = useState<Set<string>>(new Set());
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const segments = useMemo(() => plan?.segments ?? [], [plan?.segments]);
+
+  // Stable ref so callbacks don't need segments in their dep array
+  const segmentsRef = useRef(segments);
+  useEffect(() => { segmentsRef.current = segments; }, [segments]);
 
   // Load project from ?project= URL param
   useEffect(() => {
@@ -622,6 +628,117 @@ function HomeInner() {
     }
   };
 
+  const handleAddOverlay = useCallback(async (sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => {
+    try {
+      const res = await fetch("/api/upload-overlay", {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "image/png" },
+        body: blob,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      const { imagePath, imageUrl, id } = await res.json();
+
+      // If sourceEndSec comes from a text selection, we already have exact anchors —
+      // no LLM call needed. Compute a display duration as a rough estimate.
+      const hasSelectionAnchor = sourceEndSec != null;
+      const overlay: Overlay = {
+        id,
+        sourceAttachSec,
+        sourceEndSec,
+        durationSec: hasSelectionAnchor ? Math.round(Math.max(0.5, sourceEndSec! - sourceAttachSec) * 10) / 10 : 4,
+        imagePath,
+        imageUrl,
+      };
+      setPlan((prev) => prev ? { ...prev, overlays: [...(prev.overlays ?? []), overlay] } : prev);
+
+      const m = Math.floor(sourceAttachSec / 60);
+      const s = Math.floor(sourceAttachSec % 60).toString().padStart(2, "0");
+      if (hasSelectionAnchor) {
+        toast.success(`Graphic pinned to selection at ${m}:${s}`);
+        return; // skip LLM — selection already gives us exact endpoints
+      }
+
+      toast.success(`Graphic added at ${m}:${s}`);
+
+      // Background: ask AI to suggest duration. Shows spinner on badge while pending.
+      setResolvingOverlayIds((prev) => new Set(prev).add(id));
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90_000);
+
+      fetch("/api/suggest-overlay-duration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceAttachSec, segments: segmentsRef.current, imagePath }),
+        signal: controller.signal,
+      })
+        .then(async (r) => {
+          if (!r.ok) throw new Error(`Route returned ${r.status}`);
+          return r.json();
+        })
+        .then((data) => {
+          clearTimeout(timeout);
+          if (!data?.durationSec) return;
+          if (data.source === "fallback") {
+            const reason = data.error ? `: ${String(data.error).slice(0, 80)}` : "";
+            toast.error(`No LLM available — keeping 4s default${reason}`);
+            return;
+          }
+          setPlan((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              overlays: (prev.overlays ?? []).map((o) =>
+                o.id === id ? { ...o, durationSec: data.durationSec, sourceEndSec: data.sourceEndSec ?? undefined, reasoning: data.reasoning ?? "" } : o,
+              ),
+            };
+          });
+          const reasoningSuffix = data.reasoning ? ` — ${data.reasoning}` : "";
+          toast.success(`Duration: ${data.durationSec}s${reasoningSuffix}`);
+        })
+        .catch((err: unknown) => {
+          clearTimeout(timeout);
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("abort") || msg.includes("signal")) {
+            toast.error("Duration AI timed out — keeping 4s default");
+          } else {
+            toast.error(`Duration AI failed: ${msg.slice(0, 80)}`);
+          }
+        })
+        .finally(() => {
+          setResolvingOverlayIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+        });
+    } catch {
+      toast.error("Failed to upload graphic");
+    }
+  }, []);
+
+  const handleRemoveOverlay = useCallback((id: string) => {
+    setPlan((prev) => prev ? { ...prev, overlays: (prev.overlays ?? []).filter((o) => o.id !== id) } : prev);
+  }, []);
+
+  // Global paste handler: Ctrl/Cmd+V with an image → insert as overlay at current playhead.
+  // Active whenever a plan is loaded (edit AND exporting stages) — not tied to "edit" only,
+  // because the transcript editor (and its overlay markers) are visible during export too.
+  useEffect(() => {
+    if (!plan) return;
+    const onPaste = async (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find((i) => i.type.startsWith("image/"));
+      if (!item) return;
+      // If the user has words selected inside the transcript editor, its own
+      // onPaste handler already fired and handled it — don't double-fire here.
+      const sel = window.getSelection();
+      const transcriptEl = document.querySelector("[data-transcript-editor]");
+      if (sel && !sel.isCollapsed && transcriptEl?.contains(sel.anchorNode)) return;
+      e.preventDefault();
+      const blob = item.getAsFile();
+      if (!blob) return;
+      const attachSec = videoRef.current?.currentTime ?? 0;
+      await handleAddOverlay(attachSec, blob);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [plan, handleAddOverlay]);
+
   const handleRemoveSilenceCut = useCallback((segIdx: number, cutStartSec: number) => {
     setPlan(prev => {
       if (!prev) return prev;
@@ -907,6 +1024,7 @@ function HomeInner() {
             <div style={{ flex: `0 0 ${leftPanelPct}%`, minWidth: "20%", maxWidth: "80%" }}>
               <TranscriptEditor
                 segments={segments}
+                overlays={plan.overlays ?? []}
                 summary={plan.summary}
                 rationale={plan.rationale}
                 lowConfidence={plan.lowConfidence}
@@ -931,6 +1049,9 @@ function HomeInner() {
                 onJudge={handleJudge}
                 onRefine={handleRefine}
                 videoRef={videoRef}
+                onAddOverlay={handleAddOverlay}
+                onRemoveOverlay={handleRemoveOverlay}
+                resolvingOverlayIds={resolvingOverlayIds}
               />
             </div>
 
@@ -961,6 +1082,7 @@ function HomeInner() {
               {videoUrl && (
                 <VideoTimeline
                   segments={segments}
+                  overlays={plan?.overlays ?? []}
                   videoUrl={videoUrl}
                   videoRef={videoRef}
                   onTrim={handleTrimSegment}

@@ -83,12 +83,25 @@ export type NarrativeAnalysis = {
   circularSections?: NarrativeCircular[];
 };
 
+export type Overlay = {
+  id: string;
+  sourceAttachSec: number;  // source timestamp where overlay starts
+  sourceEndSec?: number;    // source timestamp where overlay ends; if set, export
+                            // recomputes duration after edits instead of using durationSec
+  durationSec: number;      // fallback / display duration (output seconds)
+  imagePath: string;        // server-side path (tmp/ or projects/)
+  imageUrl: string;         // client-side URL for display
+  label?: string;
+  reasoning?: string;       // AI explanation for the chosen duration
+};
+
 export type EditPlan = {
   version: 1;
   settings: {
     fillerSensitivity: FillerSensitivity;
   };
   segments: Segment[];
+  overlays?: Overlay[];
   issues: LinterIssue[];
   summary: string;
   totalDuration: string;
