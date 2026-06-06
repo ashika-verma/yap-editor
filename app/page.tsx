@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { signOut } from "@/app/actions/auth";
+import { HeaderAuth } from "@/components/HeaderAuth";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
 import { ExportPanel } from "@/components/ExportPanel";
@@ -1049,15 +1049,7 @@ function HomeInner() {
             </svg>
             Fixtures
           </a>
-          <button
-            onClick={() => signOut()}
-            className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"
-            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--foreground)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--muted-foreground)"; }}
-          >
-            Sign out
-          </button>
+          <HeaderAuth />
           {(stage === "edit" || stage === "exporting") && (
             <>
               {originalPlan && (

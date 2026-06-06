@@ -33,6 +33,7 @@ export async function middleware(request: NextRequest) {
   const isAuthRoute = pathname.startsWith('/auth')
   const isPublicRoute = pathname === '/' || isAuthRoute
 
+  // Only redirect to auth if accessing protected routes (not / or /auth)
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone()
     url.pathname = '/auth'
