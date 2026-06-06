@@ -9,11 +9,18 @@ import {
   JudgeResult,
   NarrativeAnalysis,
   Overlay,
+  OverlayLayout,
   Segment,
   WordCut,
   WordTimestamp,
   wordCutId,
 } from "@/lib/editPlan";
+import {
+  buildVisibleWords,
+  diffTranscript,
+  groupDeleteRanges,
+  type DiffResult,
+} from "@/lib/transcriptDiff";
 
 interface Props {
   segments: Segment[];
@@ -45,6 +52,7 @@ interface Props {
   onAddOverlay?: (sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => void;
   onRemoveOverlay?: (id: string) => void;
   onUpdateOverlayAnchor?: (id: string, sourceAttachSec: number, sourceEndSec: number) => void;
+  onUpdateOverlayLayout?: (id: string, layout: OverlayLayout) => void;
   resolvingOverlayIds?: Set<string>;
 }
 
@@ -167,6 +175,7 @@ export function TranscriptEditor({
   onAddOverlay,
   onRemoveOverlay,
   onUpdateOverlayAnchor,
+  onUpdateOverlayLayout,
   resolvingOverlayIds,
 }: Props) {
   const [showVideo, setShowVideo] = useState(false);
@@ -177,9 +186,43 @@ export function TranscriptEditor({
   const [selPairs, setSelPairs]   = useState<{ segIdx: number; wordIdx: number }[] | null>(null);
   const [undoStack, setUndoStack] = useState<UndoRange[][]>([]);
   const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
+  const [overlayPopoverId, setOverlayPopoverId] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   // Saves selection anchors before the file picker opens (picker clears the DOM selection)
   const pendingOverlayFromSel = useRef<{ attachSec: number; endSec: number } | null>(null);
+
+  // ── Import-edited-transcript modal ─────────────────────────────────────────
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importDiff, setImportDiff] = useState<DiffResult | null>(null);
+  const importDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!showImportModal) return;
+    if (importDebounceRef.current) clearTimeout(importDebounceRef.current);
+    if (!importText.trim()) { setImportDiff(null); return; }
+    importDebounceRef.current = setTimeout(() => {
+      const origWords = buildVisibleWords(segments);
+      setImportDiff(diffTranscript(origWords, importText));
+    }, 250);
+    return () => { if (importDebounceRef.current) clearTimeout(importDebounceRef.current); };
+  }, [importText, segments, showImportModal]);
+
+  const handleApplyImport = useCallback(() => {
+    if (!importDiff || importDiff.toDelete.length === 0) return;
+    const ranges = groupDeleteRanges(importDiff.toDelete);
+    // Push one undo entry so Cmd+Z reverses the whole import at once
+    setUndoStack((prev) => [
+      ...prev.slice(-19),
+      ranges.map((r) => ({ segIdx: r.segIdx, startWordIdx: r.start, endWordIdx: r.end })),
+    ]);
+    for (const { segIdx, start, end } of ranges) {
+      onCutRange(segIdx, start, end);
+    }
+    setShowImportModal(false);
+    setImportText("");
+    setImportDiff(null);
+  }, [importDiff, onCutRange]);
 
   // Video playback tracking
   const [activePos, setActivePos] = useState<{ seg: number; word: number } | null>(null);
@@ -327,6 +370,7 @@ export function TranscriptEditor({
         setSelPairs(null);
         setTooltipPos(null);
         setEditingOverlayId(null);
+        setOverlayPopoverId(null);
         window.getSelection()?.removeAllRanges();
         return;
       }
@@ -581,6 +625,21 @@ export function TranscriptEditor({
                 Copy transcript
               </>
             )}
+          </button>
+          <button
+            onClick={() => { setShowImportModal(true); setImportText(""); setImportDiff(null); }}
+            className="text-xs px-3 py-1.5 rounded-lg border transition-all flex items-center gap-1.5"
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+            title="Paste an edited transcript to automatically apply cuts"
+            onMouseEnter={(e) => { (e.currentTarget).style.color = "var(--foreground)"; }}
+            onMouseLeave={(e) => { (e.currentTarget).style.color = "var(--muted-foreground)"; }}
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <rect x="3.5" y="1" width="5.5" height="7" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+              <path d="M2 3H1.5A.5.5 0 001 3.5v5A.5.5 0 001.5 9h5a.5.5 0 00.5-.5V8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+              <path d="M5 5.5l1.5 1.5L9 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Import edit
           </button>
           {onAddOverlay && (
             <>
@@ -951,15 +1010,18 @@ export function TranscriptEditor({
                             const isResolving = resolvingOverlayIds?.has(ov.id);
                             const displayDur  = computeOverlayDuration(ov, segments);
                             const isEditing = editingOverlayId === ov.id;
+                            const isPopoverOpen = overlayPopoverId === ov.id;
                             return (
                               <span
                                 key={`ov-${ov.id}`}
                                 contentEditable={false}
-                                title={isEditing ? "Select words to repin · Enter to confirm · Esc to cancel" : isResolving ? "AI is figuring out duration…" : `${displayDur}s${ov.reasoning ? ` — ${ov.reasoning}` : ""} · click to repin · click × to remove`}
+                                title={isEditing ? "Select words to repin · Enter to confirm · Esc to cancel" : isResolving ? "AI is figuring out duration…" : `Click to edit · click × to remove`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   if (!isResolving) {
-                                    setEditingOverlayId(isEditing ? null : ov.id);
+                                    const next = isPopoverOpen ? null : ov.id;
+                                    setOverlayPopoverId(next);
+                                    if (!next) setEditingOverlayId(null);
                                     setSelPairs(null);
                                     window.getSelection()?.removeAllRanges();
                                   }
@@ -971,7 +1033,7 @@ export function TranscriptEditor({
                                   userSelect: "none",
                                   position: "relative",
                                   cursor: isResolving ? "default" : "pointer",
-                                  outline: isEditing ? "2px solid rgba(56,189,248,0.8)" : "none",
+                                  outline: isEditing || isPopoverOpen ? "2px solid rgba(56,189,248,0.8)" : "none",
                                   outlineOffset: 2,
                                   borderRadius: 5,
                                 }}
@@ -997,7 +1059,7 @@ export function TranscriptEditor({
                                   lineHeight: "11px",
                                   pointerEvents: "none",
                                 }}>
-                                  {isResolving ? "…" : `${displayDur.toFixed(1)}s`}
+                                  {isResolving ? "…" : `${displayDur.toFixed(1)}s${ov.layout === "split-left" ? " ◀" : ov.layout === "split-right" ? " ▶" : ""}`}
                                 </span>
                                 <button
                                   onClick={(e) => { e.stopPropagation(); onRemoveOverlay?.(ov.id); }}
@@ -1021,6 +1083,70 @@ export function TranscriptEditor({
                                 >
                                   ×
                                 </button>
+
+                                {/* Edit popover */}
+                                {isPopoverOpen && (
+                                  <div
+                                    contentEditable={false}
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{
+                                      position: "absolute",
+                                      top: "calc(100% + 8px)",
+                                      left: "50%",
+                                      transform: "translateX(-50%)",
+                                      zIndex: 200,
+                                      background: "rgba(15,15,20,0.98)",
+                                      border: "1px solid rgba(255,255,255,0.12)",
+                                      borderRadius: 10,
+                                      padding: "10px 10px 8px",
+                                      boxShadow: "0 8px 32px rgba(0,0,0,0.7)",
+                                      minWidth: 180,
+                                      userSelect: "none",
+                                    }}
+                                  >
+                                    {/* Caret */}
+                                    <span style={{ position: "absolute", top: -5, left: "50%", transform: "translateX(-50%)", width: 0, height: 0, borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderBottom: "5px solid rgba(255,255,255,0.12)" }} />
+
+                                    <p style={{ fontSize: 9, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 7 }}>Placement</p>
+                                    <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
+                                      {(["overlay", "split-left", "split-right"] as OverlayLayout[]).map((l) => {
+                                        const active = (ov.layout ?? "overlay") === l;
+                                        const icons = { "overlay": "⊡", "split-left": "◀⊡", "split-right": "⊡▶" } as const;
+                                        const labels = { "overlay": "On top", "split-left": "Left", "split-right": "Right" } as const;
+                                        return (
+                                          <button
+                                            key={l}
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            onClick={() => {
+                                              onUpdateOverlayLayout?.(ov.id, l);
+                                              setOverlayPopoverId(null);
+                                            }}
+                                            style={{
+                                              flex: 1, padding: "5px 4px", borderRadius: 6, border: "1px solid",
+                                              borderColor: active ? "rgba(99,102,241,0.7)" : "rgba(255,255,255,0.1)",
+                                              background: active ? "rgba(99,102,241,0.2)" : "transparent",
+                                              color: active ? "#a5b4fc" : "rgba(255,255,255,0.55)",
+                                              cursor: "pointer", fontSize: 10, textAlign: "center" as const,
+                                            }}
+                                          >
+                                            <div style={{ fontSize: 13, marginBottom: 1 }}>{icons[l]}</div>
+                                            {labels[l]}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    <button
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => {
+                                        setEditingOverlayId(ov.id);
+                                        setOverlayPopoverId(null);
+                                      }}
+                                      style={{ width: "100%", padding: "5px 8px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "rgba(255,255,255,0.55)", cursor: "pointer", fontSize: 11, textAlign: "left" as const }}
+                                    >
+                                      ↵ Repin word anchors
+                                    </button>
+                                  </div>
+                                )}
                               </span>
                             );
                           })
@@ -1077,6 +1203,129 @@ export function TranscriptEditor({
         </div>
       </div>
     </div>
+
+    {/* ── Import-edited-transcript modal ──────────────────────────────────── */}
+    {showImportModal && typeof window !== "undefined" && createPortal(
+      <div
+        style={{
+          position: "fixed", inset: 0, zIndex: 10000,
+          background: "rgba(0,0,0,0.6)", display: "flex",
+          alignItems: "center", justifyContent: "center",
+          padding: 24,
+        }}
+        onClick={(e) => { if (e.target === e.currentTarget) { setShowImportModal(false); } }}
+      >
+        <div
+          style={{
+            background: "var(--card)", border: "1px solid var(--border)",
+            borderRadius: 14, width: "100%", maxWidth: 600,
+            maxHeight: "85vh", display: "flex", flexDirection: "column",
+            boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
+          }}
+        >
+          {/* Header */}
+          <div style={{ padding: "18px 20px 14px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div>
+              <p style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)", fontFamily: "'Syne', sans-serif" }}>Import edited transcript</p>
+              <p style={{ fontSize: 12, color: "var(--muted-foreground)", marginTop: 2 }}>Paste your edited version — removed words will be detected and cut.</p>
+            </div>
+            <button onClick={() => setShowImportModal(false)} style={{ background: "transparent", border: "none", color: "var(--muted-foreground)", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: 4 }}>×</button>
+          </div>
+
+          {/* Textarea */}
+          <div style={{ padding: "14px 20px 0" }}>
+            <textarea
+              autoFocus
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              placeholder="Paste your edited transcript here…"
+              style={{
+                width: "100%", height: 120, resize: "vertical",
+                background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)",
+                borderRadius: 8, padding: "10px 12px", fontSize: 13,
+                color: "var(--foreground)", fontFamily: "inherit",
+                outline: "none", boxSizing: "border-box",
+              }}
+              onFocus={(e) => { (e.currentTarget).style.borderColor = "rgba(99,102,241,0.5)"; }}
+              onBlur={(e) => { (e.currentTarget).style.borderColor = "var(--border)"; }}
+            />
+          </div>
+
+          {/* Diff preview */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "12px 20px 0" }}>
+            {importDiff && importDiff.toDelete.length > 0 ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <p style={{ fontSize: 12, color: "var(--muted-foreground)" }}>
+                    Preview —{" "}
+                    <span style={{ color: importDiff.deletionRatio > 0.6 ? "#f87171" : "#fca5a5", fontWeight: 600 }}>
+                      {importDiff.toDelete.length} word{importDiff.toDelete.length !== 1 ? "s" : ""} will be cut
+                    </span>
+                    {importDiff.deletionRatio > 0.6 && (
+                      <span style={{ color: "#f87171", marginLeft: 6 }}>⚠ {Math.round(importDiff.deletionRatio * 100)}% of transcript</span>
+                    )}
+                  </p>
+                </div>
+                <div style={{ fontSize: 13, lineHeight: 1.75, color: "var(--foreground)", background: "rgba(255,255,255,0.02)", borderRadius: 8, padding: "10px 12px", border: "1px solid var(--border)" }}>
+                  {(() => {
+                    const deleteSet = new Set(importDiff.toDelete.map((w) => `${w.segIdx}:${w.wordIdx}`));
+                    let lastSegIdx = -1;
+                    return importDiff.origWords.map((w, i) => {
+                      const isDeleted = deleteSet.has(`${w.segIdx}:${w.wordIdx}`);
+                      const segBreak = w.segIdx !== lastSegIdx && lastSegIdx !== -1;
+                      lastSegIdx = w.segIdx;
+                      return (
+                        <React.Fragment key={i}>
+                          {segBreak && <span style={{ display: "inline-block", width: 6 }} />}
+                          {i > 0 && !segBreak && " "}
+                          <span style={{
+                            color: isDeleted ? "#f87171" : "inherit",
+                            textDecoration: isDeleted ? "line-through" : "none",
+                            opacity: isDeleted ? 0.8 : 1,
+                            background: isDeleted ? "rgba(239,68,68,0.1)" : "transparent",
+                            borderRadius: 2,
+                            padding: isDeleted ? "0 1px" : undefined,
+                          }}>
+                            {w.word}
+                          </span>
+                        </React.Fragment>
+                      );
+                    });
+                  })()}
+                </div>
+              </>
+            ) : importDiff && importDiff.toDelete.length === 0 && importText.trim() ? (
+              <p style={{ fontSize: 12, color: "var(--muted-foreground)", padding: "8px 0" }}>No differences detected — transcript matches current state.</p>
+            ) : null}
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding: "14px 20px 18px", display: "flex", gap: 8, justifyContent: "flex-end", borderTop: importDiff ? "1px solid var(--border)" : undefined, marginTop: 14 }}>
+            <button
+              onClick={() => setShowImportModal(false)}
+              style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid var(--border)", background: "transparent", color: "var(--muted-foreground)", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleApplyImport}
+              disabled={!importDiff || importDiff.toDelete.length === 0}
+              style={{
+                padding: "8px 18px", borderRadius: 8, border: "none", fontSize: 13,
+                background: importDiff && importDiff.toDelete.length > 0 ? "var(--primary)" : "rgba(99,102,241,0.3)",
+                color: "white", cursor: importDiff && importDiff.toDelete.length > 0 ? "pointer" : "default",
+                fontFamily: "'Syne', sans-serif", fontWeight: 600,
+              }}
+            >
+              {importDiff && importDiff.toDelete.length > 0
+                ? `Apply ${importDiff.toDelete.length} cut${importDiff.toDelete.length !== 1 ? "s" : ""}`
+                : "Apply cuts"}
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    )}
 
     {/* Floating selection toolbar — rendered into body so it clears the transcript border */}
     {tooltipPos && selPairs && selPairs.length > 0 && typeof window !== "undefined" && createPortal(

@@ -10,6 +10,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
+const PYTHON = path.join(process.cwd(), ".venv", "bin", "python3");
+const DETECT_FACE_SCRIPT = path.join(process.cwd(), "scripts", "detect_face.py");
 
 function resolveFfmpegPath(): string {
   try {
@@ -54,6 +56,7 @@ interface Overlay {
   durationSec: number;
   imagePath: string;
   imageUrl?: string;
+  layout?: "overlay" | "split-left" | "split-right";
   label?: string;
 }
 
@@ -392,6 +395,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No renderable spans after processing" }, { status: 400 });
     }
 
+    // ── Face detection (for split overlays) ─────────────────────────────────
+    // Detect where in the frame the speaker's face is so we can center them
+    // in the non-graphic panel rather than assuming they're at 50%.
+    let faceCenterX = 0.5; // normalized, fallback to center
+    let faceCenterY = 0.4; // normalized, fallback to slightly above center
+    const hasSplitOverlay = overlays.some(o => o.layout === "split-left" || o.layout === "split-right");
+    if (hasSplitOverlay && sourceW > 0) {
+      try {
+        const { stdout } = await execFileAsync(PYTHON, [DETECT_FACE_SCRIPT, filePath], { timeout: 30_000 });
+        const fd = JSON.parse(stdout.trim());
+        if (typeof fd.face_x === "number") faceCenterX = fd.face_x;
+        if (typeof fd.face_y === "number") faceCenterY = fd.face_y;
+        console.log(`[export] face detection: x=${faceCenterX.toFixed(3)} y=${faceCenterY.toFixed(3)} detected=${fd.detected} samples=${fd.samples ?? 0}`);
+      } catch (e) {
+        console.warn("[export] face detection failed, using center:", e instanceof Error ? e.message : e);
+      }
+    }
+
     // ── Overlay compositing ──────────────────────────────────────────────────
     // Image inputs start after: [0]=video, [1]=enhanced audio (optional)
     const overlayInputBase = useEnhanced ? 2 : 1;
@@ -453,17 +474,48 @@ export async function POST(req: NextRequest) {
       const ovParts: string[] = [];
       let prevLabel = "outv";
       for (let i = 0; i < overlayOps.length; i++) {
-        const { outStart, outEnd, inputIdx } = overlayOps[i];
+        const { overlay: ov, outStart, outEnd, inputIdx } = overlayOps[i];
         const nextLabel = i < overlayOps.length - 1 ? `ov${i}` : "outv_final";
-        // Scale to 60% of video width if sourceW known, else 720px fallback
-        const scaledW = sourceW > 0 ? Math.round(sourceW * 0.6) : 720;
-        // gte(t,start)*lt(t,end) avoids ffmpeg's inclusive-upper-bound on between()
-        // which causes a stray last frame. -loop 1 on the input keeps the single
-        // JPEG frame alive for the full enable window without PTS drift.
-        ovParts.push(`[${inputIdx}:v]scale=${scaledW}:-1[ovs${i}]`);
-        ovParts.push(
-          `[${prevLabel}][ovs${i}]overlay=x=(W-w)/2:y=(H-h)/2:enable='gte(t,${outStart.toFixed(4)})*lt(t,${outEnd.toFixed(4)})'[${nextLabel}]`
-        );
+        const enableExpr = `gte(t,${outStart.toFixed(4)})*lt(t,${outEnd.toFixed(4)})`;
+        const layout = ov.layout ?? "overlay";
+
+        if ((layout === "split-left" || layout === "split-right") && sourceW > 0 && sourceH > 0) {
+          // Zoom the video 1.35× into the speaker's face, then overlay the graphic on
+          // the side on top of the zoomed video — no black panel, room background fills
+          // in behind the graphic. The split+cover pattern prevents seeing both the
+          // normal and zoomed video simultaneously.
+          const zoomW = Math.floor(sourceW * 1.35 / 2) * 2;
+          const zoomH = Math.floor(sourceH * 1.35 / 2) * 2;
+          const imgW  = Math.floor(sourceW * 0.42 / 2) * 2; // graphic ≈ 42% of width
+          const margin = Math.round(sourceW * 0.02);          // 2% margin from edge
+          const imgX   = layout === "split-left" ? margin : sourceW - imgW - margin;
+          // Face-aware crop: place the speaker's detected face at the center of
+          // the non-graphic panel. Falls back to center (0.5) if detection failed.
+          const facePxZoomed = faceCenterX * sourceW * 1.35; // face x in the zoomed frame
+          // Center of the speaker's panel in the output
+          const speakerPanelCenter = layout === "split-left"
+            ? (imgW + margin) + (sourceW - imgW - margin) / 2   // center of right portion
+            : (sourceW - imgW - margin) / 2;                     // center of left portion
+          const rawCropX = Math.round(facePxZoomed - speakerPanelCenter);
+          const cropX = Math.max(0, Math.min(zoomW - sourceW, rawCropX));
+          const rawCropY = Math.round(faceCenterY * zoomH - sourceH / 2);
+          const cropY = Math.max(0, Math.min(zoomH - sourceH, rawCropY));
+
+          ovParts.push(`[${prevLabel}]split[base_${i}][cp_${i}]`);
+          // Zoom + directional crop: speaker appears opposite the graphic
+          ovParts.push(`[cp_${i}]scale=${zoomW}:${zoomH},crop=${sourceW}:${sourceH}:${cropX}:${cropY}[zoomed_${i}]`);
+          // Graphic: scale to fit the panel width, contained — room bg shows in margins
+          ovParts.push(`[${inputIdx}:v]scale=${imgW}:${sourceH}:force_original_aspect_ratio=decrease[img_fit_${i}]`);
+          // Overlay graphic on the zoomed video, vertically centered
+          ovParts.push(`[zoomed_${i}][img_fit_${i}]overlay=x=${imgX}:y=(H-h)/2[withimg_${i}]`);
+          // Cover base video with zoomed+graphic version only during enable window
+          ovParts.push(`[base_${i}][withimg_${i}]overlay=x=0:y=0:enable='${enableExpr}'[${nextLabel}]`);
+        } else {
+          // Regular overlay: scale graphic and composite centered or side-positioned
+          const scaledW = sourceW > 0 ? Math.round(sourceW * 0.6) : 720;
+          ovParts.push(`[${inputIdx}:v]scale=${scaledW}:-1[ovs${i}]`);
+          ovParts.push(`[${prevLabel}][ovs${i}]overlay=x=(W-w)/2:y=(H-h)/2:enable='${enableExpr}'[${nextLabel}]`);
+        }
         prevLabel = nextLabel;
       }
       filterComplex = baseFilter + ";" + ovParts.join(";");

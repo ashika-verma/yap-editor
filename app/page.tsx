@@ -16,6 +16,7 @@ import {
   Overlay,
   WordCut,
   wordCutId,
+  OverlayLayout,
 } from "@/lib/editPlan";
 
 type Stage = "upload" | "transcribing" | "edit" | "exporting";
@@ -44,6 +45,7 @@ function HomeInner() {
   const [leftPanelPct, setLeftPanelPct] = useState(46);
   const [isDraggingDivider, setIsDraggingDivider] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isFixtureSaving, setIsFixtureSaving] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
@@ -63,6 +65,7 @@ function HomeInner() {
   const [exportedVideoPath, setExportedVideoPath] = useState<string | null>(null);
   const [exportedAudioPath, setExportedAudioPath] = useState<string | null>(null);
   const [resolvingOverlayIds, setResolvingOverlayIds] = useState<Set<string>>(new Set());
+  const [pendingPaste, setPendingPaste] = useState<{ blob: Blob; attachSec: number; sourceEndSec?: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const segments = useMemo(() => plan?.segments ?? [], [plan?.segments]);
@@ -90,6 +93,14 @@ function HomeInner() {
       .catch(() => toast.error("Failed to load project"));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Dismiss layout picker on Escape
+  useEffect(() => {
+    if (!pendingPaste) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPendingPaste(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pendingPaste]);
 
   // Warn before leaving (swipe-back, tab close, refresh) when a project is active.
   useEffect(() => {
@@ -628,7 +639,16 @@ function HomeInner() {
     }
   };
 
-  const handleAddOverlay = useCallback(async (sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => {
+  // Step 1: capture the paste and show the layout picker
+  const handleAddOverlay = useCallback((sourceAttachSec: number, blob: Blob, sourceEndSec?: number) => {
+    setPendingPaste({ blob, attachSec: sourceAttachSec, sourceEndSec });
+  }, []);
+
+  // Step 2: called when the user picks a layout in the picker modal
+  const handleConfirmLayout = useCallback(async (layout: OverlayLayout) => {
+    if (!pendingPaste) return;
+    const { blob, attachSec: sourceAttachSec, sourceEndSec } = pendingPaste;
+    setPendingPaste(null);
     try {
       const res = await fetch("/api/upload-overlay", {
         method: "POST",
@@ -638,8 +658,6 @@ function HomeInner() {
       if (!res.ok) throw new Error("Upload failed");
       const { imagePath, imageUrl, id } = await res.json();
 
-      // If sourceEndSec comes from a text selection, we already have exact anchors —
-      // no LLM call needed. Compute a display duration as a rough estimate.
       const hasSelectionAnchor = sourceEndSec != null;
       const overlay: Overlay = {
         id,
@@ -648,19 +666,25 @@ function HomeInner() {
         durationSec: hasSelectionAnchor ? Math.round(Math.max(0.5, sourceEndSec! - sourceAttachSec) * 10) / 10 : 4,
         imagePath,
         imageUrl,
+        layout,
       };
       setPlan((prev) => prev ? { ...prev, overlays: [...(prev.overlays ?? []), overlay] } : prev);
+
+      // For split layouts, kick off face detection in the background so the
+      // preview zoom accurately centers the speaker away from the graphic.
+      if (layout === "split-left" || layout === "split-right") {
+        detectAndStoreFace(id);
+      }
 
       const m = Math.floor(sourceAttachSec / 60);
       const s = Math.floor(sourceAttachSec % 60).toString().padStart(2, "0");
       if (hasSelectionAnchor) {
         toast.success(`Graphic pinned to selection at ${m}:${s}`);
-        return; // skip LLM — selection already gives us exact endpoints
+        return;
       }
 
       toast.success(`Graphic added at ${m}:${s}`);
 
-      // Background: ask AI to suggest duration. Shows spinner on badge while pending.
       setResolvingOverlayIds((prev) => new Set(prev).add(id));
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 90_000);
@@ -710,11 +734,40 @@ function HomeInner() {
     } catch {
       toast.error("Failed to upload graphic");
     }
-  }, []);
+  }, [pendingPaste, segmentsRef]);
 
   const handleRemoveOverlay = useCallback((id: string) => {
     setPlan((prev) => prev ? { ...prev, overlays: (prev.overlays ?? []).filter((o) => o.id !== id) } : prev);
   }, []);
+
+  const detectAndStoreFace = useCallback(async (overlayId: string) => {
+    if (!filePath) return;
+    try {
+      const res = await fetch(`/api/detect-face?path=${encodeURIComponent(filePath)}`);
+      const { face_x, face_y, detected } = await res.json();
+      if (detected && typeof face_x === "number") {
+        setPlan((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            overlays: (prev.overlays ?? []).map((o) =>
+              o.id === overlayId ? { ...o, faceCenterX: face_x, faceCenterY: typeof face_y === "number" ? face_y : undefined } : o,
+            ),
+          };
+        });
+      }
+    } catch { /* silent — preview falls back to 0.5 */ }
+  }, [filePath]);
+
+  const handleUpdateOverlayLayout = useCallback((id: string, layout: OverlayLayout) => {
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return { ...prev, overlays: (prev.overlays ?? []).map((o) => o.id === id ? { ...o, layout } : o) };
+    });
+    if (layout === "split-left" || layout === "split-right") {
+      detectAndStoreFace(id);
+    }
+  }, [detectAndStoreFace]);
 
   const handleUpdateOverlayAnchor = useCallback((id: string, sourceAttachSec: number, sourceEndSec: number) => {
     setPlan((prev) => {
@@ -820,6 +873,29 @@ function HomeInner() {
     const blob = await res.blob();
     setExportUrl(URL.createObjectURL(blob));
   }, [exportedVideoPath]);
+
+  const handleSaveFixture = useCallback(async () => {
+    if (!plan || !originalPlan || !filePath || isFixtureSaving) return;
+    setIsFixtureSaving(true);
+    try {
+      const humanTranscript = buildTranscriptText(plan.segments);
+      const res = await fetch("/api/save-fixture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath, plan, originalPlan, humanTranscript }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to save fixture");
+      }
+      const { filename } = await res.json();
+      toast.success(`Fixture saved: ${filename}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save fixture");
+    } finally {
+      setIsFixtureSaving(false);
+    }
+  }, [plan, originalPlan, filePath, isFixtureSaving]);
 
   const keptCount = segments.filter((s) => s.keep).length;
   const keptSeconds = segments
@@ -962,18 +1038,46 @@ function HomeInner() {
             </svg>
             Projects
           </a>
+          <a
+            href="/fixtures"
+            className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent", textDecoration: "none" }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--foreground)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--muted-foreground)"; }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M2 10V4l4-3 4 3v6H8V7H4v3H2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+            </svg>
+            Fixtures
+          </a>
           {(stage === "edit" || stage === "exporting") && (
-            <button
-              onClick={handleSave}
-              disabled={isSaving}
-              className="text-xs px-3 py-1.5 rounded transition-all duration-150 flex items-center gap-1.5"
-              style={{ background: "var(--primary)", color: "white", opacity: isSaving ? 0.6 : 1 }}
-            >
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-                <path d="M1 8.5V10h1.5l4.5-4.5-1.5-1.5L1 8.5zM9.7 2.3a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.4 0L6.5 1.5 8 3l1.7-1.7z" fill="currentColor"/>
-              </svg>
-              {isSaving ? "Saving…" : "Save"}
-            </button>
+            <>
+              {originalPlan && (
+                <button
+                  onClick={handleSaveFixture}
+                  disabled={isFixtureSaving}
+                  className="text-xs px-3 py-1.5 rounded transition-all duration-150 flex items-center gap-1.5"
+                  style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent", border: "1px solid var(--border)", opacity: isFixtureSaving ? 0.6 : 1 }}
+                  title="Save original + edited transcript to fixtures/ for eval runs"
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                    <path d="M5.5 1v6M3 5l2.5 2.5L8 5M1.5 9.5h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  {isFixtureSaving ? "Saving…" : "Save as Fixture"}
+                </button>
+              )}
+              <button
+                onClick={handleSave}
+                disabled={isSaving}
+                className="text-xs px-3 py-1.5 rounded transition-all duration-150 flex items-center gap-1.5"
+                style={{ background: "var(--primary)", color: "white", opacity: isSaving ? 0.6 : 1 }}
+              >
+                <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                  <path d="M1 8.5V10h1.5l4.5-4.5-1.5-1.5L1 8.5zM9.7 2.3a1 1 0 0 0 0-1.4l-.6-.6a1 1 0 0 0-1.4 0L6.5 1.5 8 3l1.7-1.7z" fill="currentColor"/>
+                </svg>
+                {isSaving ? "Saving…" : "Save"}
+              </button>
+            </>
           )}
           {stage !== "upload" && stage !== "transcribing" && (
             <button
@@ -1065,6 +1169,7 @@ function HomeInner() {
                 onAddOverlay={handleAddOverlay}
                 onRemoveOverlay={handleRemoveOverlay}
                 onUpdateOverlayAnchor={handleUpdateOverlayAnchor}
+                onUpdateOverlayLayout={handleUpdateOverlayLayout}
                 resolvingOverlayIds={resolvingOverlayIds}
               />
             </div>
@@ -1119,6 +1224,7 @@ function HomeInner() {
                 onGenerateThumbnails={handleGenerateThumbnails}
                 onAudioUpload={handleAudioUpload}
                 onRemux={handleRemux}
+                onSaveFixture={originalPlan ? handleSaveFixture : undefined}
                 isThumbnailGenerating={isThumbnailGenerating}
               />
             </div>
@@ -1128,6 +1234,64 @@ function HomeInner() {
           </div>
         )}
       </main>
+
+      {/* ── Layout picker modal ─────────────────────────────────────────── */}
+      {pendingPaste && (
+        <div
+          style={{ position: "fixed", inset: 0, zIndex: 10001, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+          onClick={() => setPendingPaste(null)}
+        >
+          <div
+            style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 14, padding: "24px 24px 20px", width: "100%", maxWidth: 460, boxShadow: "0 24px 64px rgba(0,0,0,0.6)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p style={{ fontSize: 14, fontWeight: 600, fontFamily: "'Syne', sans-serif", color: "var(--foreground)", marginBottom: 4 }}>
+              How should this graphic appear?
+            </p>
+            <p style={{ fontSize: 12, color: "var(--muted-foreground)", marginBottom: 18 }}>
+              Click to confirm. Esc to cancel.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              {([
+                { layout: "overlay" as OverlayLayout, label: "On top", desc: "Centered over video" },
+                { layout: "split-left" as OverlayLayout, label: "← Left split", desc: "Graphic left, you right" },
+                { layout: "split-right" as OverlayLayout, label: "Right split →", desc: "You left, graphic right" },
+              ] as const).map(({ layout, label, desc }) => (
+                <button
+                  key={layout}
+                  onClick={() => handleConfirmLayout(layout)}
+                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 10px 10px", cursor: "pointer", textAlign: "center" }}
+                  onMouseEnter={(e) => { (e.currentTarget).style.borderColor = "rgba(99,102,241,0.5)"; (e.currentTarget).style.background = "rgba(99,102,241,0.07)"; }}
+                  onMouseLeave={(e) => { (e.currentTarget).style.borderColor = "var(--border)"; (e.currentTarget).style.background = "rgba(255,255,255,0.04)"; }}
+                >
+                  {/* Layout diagram */}
+                  <div style={{ width: "100%", aspectRatio: "16/9", borderRadius: 5, overflow: "hidden", marginBottom: 8, display: "flex", background: "#000" }}>
+                    {layout === "overlay" && (
+                      <div style={{ flex: 1, position: "relative", background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)" }}>
+                        <div style={{ position: "absolute", inset: "20% 25%", background: "rgba(139,92,246,0.6)", borderRadius: 3 }} />
+                      </div>
+                    )}
+                    {layout === "split-left" && (
+                      <>
+                        <div style={{ width: "40%", background: "rgba(139,92,246,0.45)", border: "1px solid rgba(139,92,246,0.4)", borderRight: "none" }} />
+                        <div style={{ flex: 1, background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)" }} />
+                      </>
+                    )}
+                    {layout === "split-right" && (
+                      <>
+                        <div style={{ flex: 1, background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)", borderRight: "none" }} />
+                        <div style={{ width: "40%", background: "rgba(139,92,246,0.45)", border: "1px solid rgba(139,92,246,0.4)" }} />
+                      </>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)", marginBottom: 2 }}>{label}</p>
+                  <p style={{ fontSize: 10, color: "var(--muted-foreground)" }}>{desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

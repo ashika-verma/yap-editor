@@ -22,6 +22,7 @@ interface Props {
   onGenerateThumbnails: (layout: "gap" | "split" | "editorial") => void;
   onAudioUpload?: (file: File) => Promise<void>;
   onRemux?: (audioPath: string) => Promise<void>;
+  onSaveFixture?: () => Promise<void>;
   isThumbnailGenerating?: boolean;
 }
 
@@ -39,11 +40,14 @@ export function ExportPanel({
   onGenerateThumbnails,
   onAudioUpload,
   onRemux,
+  onSaveFixture,
   isThumbnailGenerating = false,
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [thumbLayout, setThumbLayout] = useState<"gap" | "split" | "editorial">("editorial");
   const [audioUploading, setAudioUploading] = useState(false);
+  const [fixtureSaving, setFixtureSaving] = useState(false);
+  const [fixtureSaved, setFixtureSaved] = useState(false);
   const [remuxing, setRemuxing] = useState(false);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const adobeInputRef = useRef<HTMLInputElement>(null);
@@ -226,6 +230,31 @@ export function ExportPanel({
                 </>
               )}
             </button>
+            {onSaveFixture && (
+              <button
+                onClick={async () => {
+                  if (fixtureSaved) return;
+                  setFixtureSaving(true);
+                  try { await onSaveFixture(); setFixtureSaved(true); } finally { setFixtureSaving(false); }
+                }}
+                disabled={fixtureSaving || fixtureSaved}
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg text-sm border transition-all disabled:opacity-50"
+                style={{
+                  borderColor: fixtureSaved ? "rgba(34,197,94,0.4)" : "var(--border)",
+                  color: fixtureSaved ? "#22c55e" : "var(--muted-foreground)",
+                  background: fixtureSaved ? "rgba(34,197,94,0.06)" : "transparent",
+                }}
+                title="Save this session to fixtures/ for eval runs"
+              >
+                {fixtureSaved ? (
+                  <><svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M2 5.5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>Saved</>
+                ) : fixtureSaving ? (
+                  <><div className="spinner" style={{ width: 11, height: 11, borderWidth: 1.5 }} />Saving…</>
+                ) : (
+                  <><svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M5.5 1v6M3 5l2.5 2.5L8 5M1.5 9.5h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>Save fixture</>
+                )}
+              </button>
+            )}
             <button
               onClick={onReExport}
               className="px-4 py-2.5 rounded-lg text-sm border transition-all"

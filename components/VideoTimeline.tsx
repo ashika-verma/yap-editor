@@ -406,29 +406,86 @@ export function VideoTimeline({ segments, overlays = [], videoUrl, videoRef, onT
     <div className="flex flex-col gap-4">
       {/* Video player */}
       <div className="relative rounded-xl overflow-hidden" style={{ aspectRatio: "16/9", background: "#000" }}>
-        <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" />
+        {(() => {
+          const splitOverlay = activeOverlays.find(o => o.layout === "split-left" || o.layout === "split-right");
+          const sl = splitOverlay?.layout;
+          // Split mode: scale(1.35) with a face-aware transform-origin so the
+          // speaker lands opposite the graphic. The origin formula mirrors the
+          // export's cropX = max(0, min(max, facePx - panelCenter)), keeping
+          // edges covered (no black gaps) while placing the face accurately.
+          const IMG_W = 0.42, MARGIN = 0.02;
+          let videoStyle: React.CSSProperties;
+          if (sl) {
+            const fx = splitOverlay?.faceCenterX ?? 0.5;
+            const targetX = sl === "split-left"
+              ? IMG_W + MARGIN + (1 - IMG_W - MARGIN) / 2   // center of right panel
+              : (1 - IMG_W - MARGIN) / 2;                    // center of left panel
+            // origin that places face exactly at targetX; clamp to [0,100] to
+            // guarantee the near edge stays inside the container (no black gap)
+            const rawOrigin = (1.35 * fx - targetX) / 0.35 * 100;
+            const originX = Math.max(0, Math.min(100, rawOrigin)).toFixed(1);
+            // Vertical: anchor at the face's detected y position so zooming
+            // keeps the face vertically centered rather than drifting toward
+            // the frame center (which can cut off the top of the head).
+            const fy = splitOverlay?.faceCenterY ?? 0.4;
+            const originY = (fy * 100).toFixed(1);
+            videoStyle = {
+              width: "100%", height: "100%",
+              objectFit: "cover",
+              transformOrigin: `${originX}% ${originY}%`,
+              transform: "scale(1.35)",
+            };
+          } else {
+            videoStyle = { width: "100%", height: "100%", objectFit: "contain" };
+          }
+          return <video ref={videoRef} src={videoUrl} style={videoStyle} />;
+        })()}
 
         {/* Live overlay preview: shows the graphic composited over the video */}
-        {activeOverlays.map((ov) => (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            key={ov.id}
-            src={ov.imageUrl}
-            alt="overlay preview"
-            style={{
-              position: "absolute",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-              maxWidth: "60%",
-              maxHeight: "70%",
-              objectFit: "contain",
-              borderRadius: 6,
-              pointerEvents: "none",
-              zIndex: 5,
-            }}
-          />
-        ))}
+        {activeOverlays.map((ov) => {
+          const layout = ov.layout ?? "overlay";
+          const isSplit = layout === "split-left" || layout === "split-right";
+          return isSplit ? (
+            // Graphic floats on top of the zoomed video — no black panel.
+            // The video (object-cover) fills behind it, showing the room background.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={ov.id}
+              src={ov.imageUrl}
+              alt="overlay preview"
+              style={{
+                position: "absolute",
+                top: "50%",
+                transform: "translateY(-50%)",
+                [layout === "split-left" ? "left" : "right"]: "2%",
+                maxWidth: "42%",
+                maxHeight: "90%",
+                objectFit: "contain",
+                pointerEvents: "none",
+                zIndex: 5,
+              }}
+            />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              key={ov.id}
+              src={ov.imageUrl}
+              alt="overlay preview"
+              style={{
+                position: "absolute",
+                top: "50%",
+                left: "50%",
+                transform: "translate(-50%, -50%)",
+                maxWidth: "60%",
+                maxHeight: "70%",
+                objectFit: "contain",
+                borderRadius: 6,
+                pointerEvents: "none",
+                zIndex: 5,
+              }}
+            />
+          );
+        })}
 
         <button
           onClick={handlePlayPause}

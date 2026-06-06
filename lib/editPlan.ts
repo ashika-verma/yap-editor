@@ -83,6 +83,8 @@ export type NarrativeAnalysis = {
   circularSections?: NarrativeCircular[];
 };
 
+export type OverlayLayout = "overlay" | "split-left" | "split-right";
+
 export type Overlay = {
   id: string;
   sourceAttachSec: number;  // source timestamp where overlay starts
@@ -91,6 +93,9 @@ export type Overlay = {
   durationSec: number;      // fallback / display duration (output seconds)
   imagePath: string;        // server-side path (tmp/ or projects/)
   imageUrl: string;         // client-side URL for display
+  layout?: OverlayLayout;   // default "overlay" (centered on top)
+  faceCenterX?: number;     // normalized 0–1 horizontal face center, detected when split layout is set
+  faceCenterY?: number;     // normalized 0–1 vertical face center
   label?: string;
   reasoning?: string;       // AI explanation for the chosen duration
 };
