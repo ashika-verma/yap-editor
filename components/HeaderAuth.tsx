@@ -37,14 +37,19 @@ export function HeaderAuth() {
   }
 
   return (
-    <button
-      onClick={() => signOut()}
-      className="text-xs px-3 py-1.5 rounded border transition-all duration-150"
-      style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--foreground)"; }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--muted-foreground)"; }}
-    >
-      Sign out
-    </button>
+    <div className="flex items-center gap-3">
+      <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+        {user.email}
+      </span>
+      <button
+        onClick={() => signOut()}
+        className="text-xs px-3 py-1.5 rounded border transition-all duration-150"
+        style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--foreground)"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--muted-foreground)"; }}
+      >
+        Sign out
+      </button>
+    </div>
   )
 }
