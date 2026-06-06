@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { signIn, signUp } from '@/app/actions/auth'
+import { GoogleButton } from '@/components/auth/GoogleButton'
 
 export default function AuthPage() {
   const [isSignUp, setIsSignUp] = useState(false)
@@ -36,6 +37,14 @@ export default function AuthPage() {
         <h1 className="text-2xl font-bold mb-6 text-center">
           {isSignUp ? 'Sign Up' : 'Sign In'}
         </h1>
+
+        <GoogleButton />
+
+        <div className="flex items-center gap-3 my-4">
+          <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
+          <span className="text-xs text-muted-foreground">or</span>
+          <div className="flex-1 h-px" style={{ background: "var(--border)" }} />
+        </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <input
