@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { HeaderAuth } from "@/components/HeaderAuth";
+import { UserMenu } from "@/components/UserMenu";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
 import { ExportPanel } from "@/components/ExportPanel";
@@ -1049,7 +1049,7 @@ function HomeInner() {
             </svg>
             Fixtures
           </a>
-          <HeaderAuth />
+          <UserMenu />
           {(stage === "edit" || stage === "exporting") && (
             <>
               {originalPlan && (
