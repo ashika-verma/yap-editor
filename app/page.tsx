@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useCallback, useMemo, useRef, useEffect, Suspense } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { useAuth } from "@/lib/authContext";
+import { signOut } from "@/app/actions/auth";
 import { UploadStage } from "@/components/UploadStage";
 import { TranscriptEditor } from "@/components/TranscriptEditor";
 import { ExportPanel } from "@/components/ExportPanel";
@@ -31,24 +31,7 @@ export default function Home() {
 }
 
 function HomeInner() {
-  const { user, loading, signOut } = useAuth();
   const searchParams = useSearchParams();
-  const router = useRouter();
-
-  // Redirect to auth if not logged in
-  useEffect(() => {
-    if (!loading && !user) {
-      router.push("/auth");
-    }
-  }, [user, loading, router]);
-
-  if (loading) {
-    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
-  }
-
-  if (!user) {
-    return null;
-  }
   const [stage, setStage] = useState<Stage>("upload");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [filePath, setFilePath] = useState<string | null>(null);
@@ -105,7 +88,6 @@ function HomeInner() {
         setOriginalPlan(d.plan);
         setFillerSensitivity(d.plan.settings?.fillerSensitivity ?? "balanced");
         setStage("edit");
-        router.replace("/");
       })
       .catch(() => toast.error("Failed to load project"));
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1068,10 +1050,7 @@ function HomeInner() {
             Fixtures
           </a>
           <button
-            onClick={async () => {
-              await signOut();
-              router.push("/auth");
-            }}
+            onClick={() => signOut()}
             className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"
             style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--foreground)"; }}
