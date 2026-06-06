@@ -29,7 +29,10 @@ async function runMigration(user: any) {
           {
             user_id: user.id,
             name: meta.name || `Project ${new Date(meta.savedAt).toLocaleDateString()}`,
-            data: plan,
+            data: {
+              ...plan,
+              videoPath: meta.videoPath, // Store the video path for later retrieval
+            },
           },
         ]);
 

@@ -29,7 +29,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
 
     return NextResponse.json({
       plan: project.data,
-      filePath: null, // Projects don't store video files in Supabase
+      filePath: (project.data as any)?.videoPath || null,
     });
   } catch (e) {
     console.error("Failed to load project:", e);
