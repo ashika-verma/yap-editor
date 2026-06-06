@@ -9,8 +9,10 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// For server-side operations (API routes)
-export const supabaseAdmin = createClient(
-  supabaseUrl,
-  process.env.SUPABASE_SECRET_KEY || "",
-);
+// For server-side operations (API routes only)
+let supabaseAdmin: ReturnType<typeof createClient> | null = null;
+if (typeof window === "undefined" && process.env.SUPABASE_SECRET_KEY) {
+  supabaseAdmin = createClient(supabaseUrl, process.env.SUPABASE_SECRET_KEY);
+}
+
+export { supabaseAdmin };
