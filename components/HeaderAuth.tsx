@@ -36,10 +36,12 @@ export function HeaderAuth() {
     )
   }
 
+  const displayName = (user as any)?.user_metadata?.full_name || user.email
+
   return (
     <div className="flex items-center gap-3">
       <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-        {user.email}
+        {displayName}
       </span>
       <button
         onClick={() => signOut()}
