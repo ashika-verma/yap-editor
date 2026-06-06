@@ -1,137 +1,49 @@
 import { NextRequest, NextResponse } from "next/server";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from "fs";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import path from "path";
-import { randomUUID } from "crypto";
+import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const execFileAsync = promisify(execFile);
-
-const PROJECTS_DIR = path.join(process.cwd(), "projects");
-
-function ensureProjectsDir() {
-  mkdirSync(PROJECTS_DIR, { recursive: true });
-}
-
-export interface ProjectMeta {
-  id: string;
-  name: string;
-  savedAt: string;
-  originalDuration: string;
-  editedDuration: string;
-  segmentsKept: number;
-  segmentsTotal: number;
-  videoPath: string;
-  enhancedAudioPath: string | null;
-  hasThumbnail: boolean;
-}
-
-// GET /api/projects — list all saved projects, newest first
-export async function GET() {
-  ensureProjectsDir();
-  const projects: ProjectMeta[] = [];
-
-  for (const id of readdirSync(PROJECTS_DIR)) {
-    const metaPath = path.join(PROJECTS_DIR, id, "meta.json");
-    if (!existsSync(metaPath)) continue;
-    try {
-      projects.push(JSON.parse(readFileSync(metaPath, "utf8")));
-    } catch {}
-  }
-
-  projects.sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime());
-  return NextResponse.json({ projects });
-}
-
-// POST /api/projects — save a project
+// POST /api/projects — save a project to Supabase
 export async function POST(req: NextRequest) {
-  ensureProjectsDir();
-  const { filePath, plan, name } = await req.json();
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
 
-  if (!filePath || !existsSync(filePath)) {
-    return NextResponse.json({ error: "Video file not found" }, { status: 400 });
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
+
+  const { filePath, plan } = await req.json();
+
   if (!plan?.segments?.length) {
     return NextResponse.json({ error: "No plan to save" }, { status: 400 });
   }
 
-  const id = randomUUID();
-  const projectDir = path.join(PROJECTS_DIR, id);
-  mkdirSync(projectDir, { recursive: true });
-
-  // Copy video
-  const ext = path.extname(filePath) || ".mp4";
-  const savedVideoPath = path.join(projectDir, `video${ext}`);
-  copyFileSync(filePath, savedVideoPath);
-
-  // Copy enhanced audio if present
-  let savedEnhancedPath: string | null = null;
-  const enhancedSrc = plan.enhancedAudioPath;
-  if (enhancedSrc && existsSync(enhancedSrc)) {
-    savedEnhancedPath = path.join(projectDir, "enhanced.wav");
-    copyFileSync(enhancedSrc, savedEnhancedPath);
-  }
-
-  // Copy overlay images and rewrite paths so they survive tmp/ cleanup
-  const savedOverlays = (plan.overlays ?? []).map(
-    (ov: { id: string; imagePath: string; imageUrl: string; [k: string]: unknown }, idx: number) => {
-      if (!ov.imagePath || !existsSync(ov.imagePath)) return ov;
-      const ext2 = path.extname(ov.imagePath) || ".png";
-      const destPath = path.join(projectDir, `overlay_${idx}${ext2}`);
-      try {
-        copyFileSync(ov.imagePath, destPath);
-        return {
-          ...ov,
-          imagePath: destPath,
-          imageUrl: `/api/video?path=${encodeURIComponent(destPath)}`,
-        };
-      } catch {
-        return ov;
-      }
-    }
-  );
-
-  // Extract thumbnail (best-effort)
-  const thumbnailPath = path.join(projectDir, "thumbnail.jpg");
-  let hasThumbnail = false;
   try {
-    await execFileAsync("ffmpeg", [
-      "-y", "-i", savedVideoPath,
-      "-ss", "00:00:02",
-      "-vframes", "1",
-      "-q:v", "4",
-      "-vf", "scale=480:-1",
-      thumbnailPath,
-    ], { timeout: 15_000 });
-    hasThumbnail = existsSync(thumbnailPath);
-  } catch {}
+    const projectName = plan.summary || `Project ${new Date().toLocaleDateString()}`;
 
-  // Save plan with updated paths
-  const savedPlan = {
-    ...plan,
-    enhancedAudioPath: savedEnhancedPath,
-    overlays: savedOverlays,
-  };
-  writeFileSync(path.join(projectDir, "plan.json"), JSON.stringify(savedPlan), "utf8");
+    // Insert project into Supabase
+    const { data, error } = await supabase
+      .from("projects")
+      .insert([
+        {
+          user_id: user.id,
+          name: projectName,
+          data: plan,
+        },
+      ])
+      .select()
+      .single();
 
-  // Build meta
-  const keptSegs = plan.segments.filter((s: { keep: boolean }) => s.keep);
-  const meta: ProjectMeta = {
-    id,
-    name: name || path.basename(filePath, ext),
-    savedAt: new Date().toISOString(),
-    originalDuration: plan.totalDuration ?? "",
-    editedDuration: plan.editedDuration ?? "",
-    segmentsKept: keptSegs.length,
-    segmentsTotal: plan.segments.length,
-    videoPath: savedVideoPath,
-    enhancedAudioPath: savedEnhancedPath,
-    hasThumbnail,
-  };
-  writeFileSync(path.join(projectDir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
+    if (error) throw error;
 
-  return NextResponse.json({ id, meta });
+    return NextResponse.json({ 
+      ok: true, 
+      projectId: data.id,
+      project: data 
+    });
+  } catch (e) {
+    console.error("Failed to save project:", e);
+    return NextResponse.json({ error: "Failed to save project" }, { status: 500 });
+  }
 }
