@@ -247,7 +247,7 @@ export function VideoTimeline({ segments, overlays = [], videoUrl, videoRef, onT
           if (next) video.currentTime = next.startSec;
         }
       }
-      video.play();
+      video.play().catch(() => {});
     } else {
       video.pause();
     }

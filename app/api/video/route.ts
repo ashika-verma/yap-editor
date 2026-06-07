@@ -54,6 +54,7 @@ export async function GET(req: NextRequest) {
     const chunkSize = end - start + 1;
 
     const stream = createReadStream(resolved, { start, end });
+    req.signal.addEventListener("abort", () => stream.destroy());
     const webStream = Readable.toWeb(stream) as ReadableStream;
 
     return new NextResponse(webStream, {
@@ -69,6 +70,7 @@ export async function GET(req: NextRequest) {
   }
 
   const stream = createReadStream(resolved);
+  req.signal.addEventListener("abort", () => stream.destroy());
   const webStream = Readable.toWeb(stream) as ReadableStream;
 
   return new NextResponse(webStream, {

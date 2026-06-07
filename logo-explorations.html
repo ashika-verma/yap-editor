@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yap — Frame Refinement</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #080809; color: #fafafa; font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 56px 48px; }
+
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #333; margin-bottom: 28px; margin-top: 56px; }
+  h2:first-of-type { margin-top: 0; }
+
+  .row { display: flex; align-items: flex-end; gap: 32px; flex-wrap: wrap; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .mark { display: flex; align-items: center; justify-content: center; }
+  .tag { font-size: 10px; color: #333; letter-spacing: 0.06em; text-align: center; }
+
+  .divider { width: 100%; max-width: 800px; height: 1px; background: #141415; margin: 56px 0 0; }
+
+  /* Finalist section */
+  .finalists { display: flex; gap: 40px; flex-wrap: wrap; margin-top: 0; }
+  .finalist { background: #0e0e0f; border: 1px solid #1c1c1d; border-radius: 20px; padding: 36px 40px; display: flex; flex-direction: column; gap: 28px; min-width: 260px; }
+  .finalist-head { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #2e2e2f; }
+  .lockup { display: flex; align-items: center; gap: 14px; }
+  .wm { font-family: 'Syne', sans-serif; font-size: 30px; font-weight: 800; letter-spacing: -0.04em; color: #fafafa; line-height: 1; }
+  .icon-row { display: flex; gap: 12px; align-items: center; }
+  .icon { width: 52px; height: 52px; border-radius: 13px; background: #6366f1; display: flex; align-items: center; justify-content: center; }
+  .icon-sm { width: 32px; height: 32px; border-radius: 8px; background: #6366f1; display: flex; align-items: center; justify-content: center; }
+  .icon-xs { width: 20px; height: 20px; border-radius: 5px; background: #6366f1; display: flex; align-items: center; justify-content: center; }
+  .light { background: #eaeaea; border-radius: 12px; padding: 16px 20px; display: flex; align-items: center; gap: 12px; }
+  .wmd { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 800; letter-spacing: -0.04em; color: #090909; line-height: 1; }
+</style>
+</head>
+<body>
+
+<h2>Weight — arm 18px</h2>
+<div class="row">
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">2px · hairline</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">3.5px · thin</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">5px · medium</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">7px · bold</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">9.5px · heavy</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">13px · chunky</span>
+  </div>
+</div>
+
+<div class="divider"></div>
+<h2>Arm length — 5px stroke</h2>
+<div class="row">
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 18 L6 6 L18 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M34 46 L46 46 L46 34" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">12px · stubby</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 21 L6 6 L21 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M31 46 L46 46 L46 31" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">15px</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">18px · balanced</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 28 L6 6 L28 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M24 46 L46 46 L46 24" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">22px</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 32 L6 6 L32 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M20 46 L46 46 L46 20" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">26px · long</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 38 L6 6 L38 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M14 46 L46 46 L46 14" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">32px · full</span>
+  </div>
+</div>
+
+<div class="divider"></div>
+<h2>Corner style — 5px · 18px arm</h2>
+<div class="row">
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">round caps</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+      </svg>
+    </div>
+    <span class="tag">square caps</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="butt" stroke-linejoin="miter"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="butt" stroke-linejoin="miter"/>
+      </svg>
+    </div>
+    <span class="tag">butt caps</span>
+  </div>
+  <!-- Asymmetric: one arm longer than other -->
+  <div class="item" style="margin-left: 24px;">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <!-- Horizontal arm longer than vertical -->
+        <path d="M6 20 L6 6 L28 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M24 46 L46 46 L46 32" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">asymmetric<br>h > v</span>
+  </div>
+  <div class="item">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <!-- Vertical arm longer than horizontal -->
+        <path d="M6 28 L6 6 L20 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M32 46 L46 46 L46 24" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">asymmetric<br>v > h</span>
+  </div>
+  <!-- All four corners -->
+  <div class="item" style="margin-left: 24px;">
+    <div class="mark">
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
+        <path d="M6 20 L6 6 L20 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M32 6 L46 6 L46 20" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6 32 L6 46 L20 46" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M32 46 L46 46 L46 32" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <span class="tag">all four</span>
+  </div>
+</div>
+
+<div class="divider"></div>
+<h2>Finalists</h2>
+<div class="finalists">
+
+  <!-- A: Thin & airy -->
+  <div class="finalist">
+    <span class="finalist-head">A — Thin &amp; Airy</span>
+    <div class="lockup">
+      <svg width="44" height="44" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wm">yap</span>
+    </div>
+    <div class="icon-row">
+      <div class="icon">
+        <svg width="36" height="36" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-sm">
+        <svg width="22" height="22" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-xs">
+        <svg width="13" height="13" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+    <div class="light">
+      <svg width="28" height="28" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wmd">yap</span>
+    </div>
+  </div>
+
+  <!-- B: Medium & balanced -->
+  <div class="finalist">
+    <span class="finalist-head">B — Medium &amp; Balanced</span>
+    <div class="lockup">
+      <svg width="44" height="44" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wm">yap</span>
+    </div>
+    <div class="icon-row">
+      <div class="icon">
+        <svg width="36" height="36" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-sm">
+        <svg width="22" height="22" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-xs">
+        <svg width="13" height="13" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+    <div class="light">
+      <svg width="28" height="28" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wmd">yap</span>
+    </div>
+  </div>
+
+  <!-- C: Bold & confident -->
+  <div class="finalist">
+    <span class="finalist-head">C — Bold &amp; Confident</span>
+    <div class="lockup">
+      <svg width="44" height="44" viewBox="0 0 52 52" fill="none">
+        <path d="M6 22 L6 6 L22 6" stroke="#6366f1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M30 46 L46 46 L46 30" stroke="#6366f1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wm">yap</span>
+    </div>
+    <div class="icon-row">
+      <div class="icon">
+        <svg width="36" height="36" viewBox="0 0 52 52" fill="none">
+          <path d="M6 22 L6 6 L22 6" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M30 46 L46 46 L46 30" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-sm">
+        <svg width="22" height="22" viewBox="0 0 52 52" fill="none">
+          <path d="M6 22 L6 6 L22 6" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M30 46 L46 46 L46 30" stroke="white" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="icon-xs">
+        <svg width="13" height="13" viewBox="0 0 52 52" fill="none">
+          <path d="M6 22 L6 6 L22 6" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M30 46 L46 46 L46 30" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+    <div class="light">
+      <svg width="28" height="28" viewBox="0 0 52 52" fill="none">
+        <path d="M6 22 L6 6 L22 6" stroke="#6366f1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M30 46 L46 46 L46 30" stroke="#6366f1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wmd">yap</span>
+    </div>
+  </div>
+
+  <!-- D: Sharp / technical -->
+  <div class="finalist">
+    <span class="finalist-head">D — Sharp &amp; Technical</span>
+    <div class="lockup">
+      <svg width="44" height="44" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+      </svg>
+      <span class="wm">yap</span>
+    </div>
+    <div class="icon-row">
+      <div class="icon">
+        <svg width="36" height="36" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+        </svg>
+      </div>
+      <div class="icon-sm">
+        <svg width="22" height="22" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="5.5" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="5.5" stroke-linecap="square" stroke-linejoin="miter"/>
+        </svg>
+      </div>
+      <div class="icon-xs">
+        <svg width="13" height="13" viewBox="0 0 52 52" fill="none">
+          <path d="M6 24 L6 6 L24 6" stroke="white" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M28 46 L46 46 L46 28" stroke="white" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+        </svg>
+      </div>
+    </div>
+    <div class="light">
+      <svg width="28" height="28" viewBox="0 0 52 52" fill="none">
+        <path d="M6 24 L6 6 L24 6" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M28 46 L46 46 L46 28" stroke="#6366f1" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter"/>
+      </svg>
+      <span class="wmd">yap</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo, useRef, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { UserMenu } from "@/components/UserMenu";
 import { UploadStage } from "@/components/UploadStage";
@@ -32,10 +32,14 @@ export default function Home() {
 
 function HomeInner() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const [isElectron, setIsElectron] = useState(false);
+  const [loadingProject, setLoadingProject] = useState(() => !!searchParams.get("project"));
   const [stage, setStage] = useState<Stage>("upload");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [filePath, setFilePath] = useState<string | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [plan, setPlan] = useState<EditPlan | null>(null);
   const [originalPlan, setOriginalPlan] = useState<EditPlan | null>(null);
   const [fillerSensitivity, setFillerSensitivity] =
@@ -73,23 +77,28 @@ function HomeInner() {
   // Stable ref so callbacks don't need segments in their dep array
   const segmentsRef = useRef(segments);
   useEffect(() => { segmentsRef.current = segments; }, [segments]);
+  useEffect(() => { setIsElectron(!!(window as any).electronAPI?.isElectron); }, []);
 
   // Load project from ?project= URL param
   useEffect(() => {
-    const projectId = searchParams.get("project");
-    if (!projectId) return;
-    fetch(`/api/projects/${projectId}`)
+    const projId = searchParams.get("project");
+    if (!projId) return;
+    fetch(`/api/projects/${projId}`)
       .then((r) => r.json())
       .then((d) => {
-        if (d.error) { toast.error(d.error); return; }
+        if (d.error) { toast.error(d.error); setLoadingProject(false); return; }
+        setProjectId(projId);
         setFilePath(d.filePath);
-        setVideoUrl(`/api/video?path=${encodeURIComponent(d.filePath)}`);
+        if (d.filePath) {
+          setVideoUrl(`/api/video?path=${encodeURIComponent(d.filePath)}`);
+        }
         setPlan(d.plan);
         setOriginalPlan(d.plan);
         setFillerSensitivity(d.plan.settings?.fillerSensitivity ?? "balanced");
         setStage("edit");
+        setLoadingProject(false);
       })
-      .catch(() => toast.error("Failed to load project"));
+      .catch(() => { toast.error("Failed to load project"); setLoadingProject(false); });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -111,6 +120,23 @@ function HomeInner() {
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
   }, [stage]);
+
+  // Auto-save project after changes (only for existing projects)
+  useEffect(() => {
+    if (!projectId || !plan || stage !== "edit") return;
+    const timeout = setTimeout(async () => {
+      try {
+        await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filePath, plan, projectId }),
+        });
+      } catch {
+        // Silent fail for auto-save
+      }
+    }, 2000);
+    return () => clearTimeout(timeout);
+  }, [plan, projectId, stage, filePath]);
 
   // Dynamic favicon based on pipeline stage.
   useEffect(() => {
@@ -547,9 +573,13 @@ function HomeInner() {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filePath, plan }),
+        body: JSON.stringify({ filePath, plan, projectId }),
       });
       if (!res.ok) throw new Error("Save failed");
+      const data = await res.json();
+      if (data.projectId && !projectId) {
+        setProjectId(data.projectId);
+      }
       toast.success("Project saved");
     } catch {
       toast.error("Failed to save project");
@@ -923,11 +953,29 @@ function HomeInner() {
     stage,
   );
 
+  if (loadingProject) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-5" style={{ background: "var(--background)" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 14, background: "var(--primary)", display: "flex", alignItems: "center", justifyContent: "center", animation: "pulse 1.8s ease-in-out infinite" }}>
+          <svg width="34" height="34" viewBox="0 0 52 52" fill="none">
+            <path d="M7 25 L7 7 L25 7" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M27 45 L45 45 L45 27" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 22, letterSpacing: "-0.04em", color: "var(--foreground)" }}>yap</span>
+          <span style={{ fontSize: 12, color: "var(--muted-foreground)" }}>Loading project…</span>
+        </div>
+        <style>{`@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.8;transform:scale(0.96)} }`}</style>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen" style={{ background: "var(--background)" }}>
       {/* Header */}
       <header
-        className="border-b flex items-center justify-between px-6 sm:px-10 py-4"
+        className="border-b flex items-center justify-between py-4"
         style={{
           borderColor: "var(--border)",
           background: "rgba(8,8,9,0.9)",
@@ -935,36 +983,26 @@ function HomeInner() {
           position: "sticky",
           top: 0,
           zIndex: 50,
+          WebkitAppRegion: "drag" as any,
+          // Extra left padding to clear macOS traffic light buttons in Electron
+          paddingLeft: isElectron ? 84 : 24,
+          paddingRight: 24,
         }}
       >
         <div className="flex items-center gap-3">
-          <div
-            className="w-6 h-6 rounded flex items-center justify-center flex-shrink-0"
-            style={{ background: "var(--primary)" }}
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path
-                d="M1.5 1.5v9M1.5 6h9M10.5 3.5L8 6l2.5 2.5"
-                stroke="white"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+          <div style={{ width: 28, height: 28, borderRadius: 7, background: "var(--primary)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg width="18" height="18" viewBox="0 0 52 52" fill="none">
+              <path d="M7 25 L7 7 L25 7" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M27 45 L45 45 L45 27" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </div>
-          <span
-            className="text-sm font-semibold tracking-widest uppercase"
-            style={{
-              fontFamily: "'Syne', sans-serif",
-              color: "var(--foreground)",
-            }}
-          >
-            Yap Editor
+          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 20, letterSpacing: "-0.04em", color: "var(--foreground)", lineHeight: 1 }}>
+            yap
           </span>
         </div>
 
         {/* Step indicator */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1" style={{ WebkitAppRegion: "no-drag" } as any}>
           {(["Upload", "Analyse", "Edit", "Export"] as const).map(
             (label, i) => {
               const active = i === stageIndex;
@@ -1021,13 +1059,13 @@ function HomeInner() {
           )}
         </div>
 
-        <div className="flex items-center gap-2 justify-end" style={{ minWidth: 160 }}>
-          <a
-            href="/projects"
+        <div className="flex items-center gap-2 justify-end" style={{ minWidth: 160, WebkitAppRegion: "no-drag" } as any}>
+          <button
+            onClick={() => router.push("/projects")}
             className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"
-            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent", textDecoration: "none" }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--foreground)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "var(--muted-foreground)"; }}
+            style={{ borderColor: "var(--border)", color: "var(--muted-foreground)", background: "transparent" }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--foreground)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "var(--muted-foreground)"; }}
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <rect x="1" y="1" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
@@ -1036,7 +1074,7 @@ function HomeInner() {
               <rect x="7" y="7" width="4" height="4" rx="1" stroke="currentColor" strokeWidth="1.3"/>
             </svg>
             Projects
-          </a>
+          </button>
           <a
             href="/fixtures"
             className="text-xs px-3 py-1.5 rounded border transition-all duration-150 flex items-center gap-1.5"

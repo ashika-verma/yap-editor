@@ -23,18 +23,39 @@ async function runMigration(user: any) {
       const meta = JSON.parse(metaContent);
       const plan = JSON.parse(planContent);
 
-      const { error } = await supabase
+      const projectData = {
+        ...plan,
+        videoPath: meta.videoPath,
+        localProjectId: id,
+      };
+
+      // Check if a project with this local id already exists (from a prior migration run)
+      const { data: existing } = await supabase
         .from("projects")
-        .insert([
-          {
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("data->>localProjectId", id)
+        .maybeSingle();
+
+      let error: any;
+      if (existing) {
+        // Update the existing record to add/fix videoPath
+        ({ error } = await supabase
+          .from("projects")
+          .update({
+            name: meta.name || `Project ${new Date(meta.savedAt).toLocaleDateString()}`,
+            data: projectData,
+          })
+          .eq("id", existing.id));
+      } else {
+        ({ error } = await supabase
+          .from("projects")
+          .insert([{
             user_id: user.id,
             name: meta.name || `Project ${new Date(meta.savedAt).toLocaleDateString()}`,
-            data: {
-              ...plan,
-              videoPath: meta.videoPath, // Store the video path for later retrieval
-            },
-          },
-        ]);
+            data: projectData,
+          }]));
+      }
 
       if (!error) {
         count++;

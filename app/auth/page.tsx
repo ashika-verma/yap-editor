@@ -1,8 +1,10 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { signIn, signUp } from '@/app/actions/auth'
 import { GoogleButton } from '@/components/auth/GoogleButton'
+import { createClient } from '@/lib/supabase/browser'
 
 export default function AuthPage() {
   const [isSignUp, setIsSignUp] = useState(false)
@@ -10,6 +12,39 @@ export default function AuthPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [oauthPending, setOauthPending] = useState(false)
+  const router = useRouter()
+
+  // Listen for yap:// deep link from Electron (Google OAuth callback)
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (!api?.onDeepLink) return
+
+    setOauthPending(false)
+
+    const cleanup = api.onDeepLink(async (url: string) => {
+      setOauthPending(true)
+      try {
+        const parsed = new URL(url)
+        const code = parsed.searchParams.get('code')
+        if (code) {
+          const supabase = createClient()
+          const { error } = await supabase.auth.exchangeCodeForSession(code)
+          if (error) {
+            setError('Google sign-in failed. Try again.')
+          } else {
+            router.push('/')
+          }
+        }
+      } catch {
+        setError('Google sign-in failed. Try again.')
+      } finally {
+        setOauthPending(false)
+      }
+    })
+
+    return cleanup
+  }, [router])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -34,11 +69,25 @@ export default function AuthPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="w-full max-w-md p-8 border border-border rounded-lg bg-card">
-        <h1 className="text-2xl font-bold mb-6 text-center">
-          {isSignUp ? 'Sign Up' : 'Sign In'}
+        <div className="flex items-center justify-center gap-3 mb-8">
+          <div style={{ width: 36, height: 36, borderRadius: 9, background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <svg width="22" height="22" viewBox="0 0 52 52" fill="none">
+              <path d="M7 25 L7 7 L25 7" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M27 45 L45 45 L45 27" stroke="white" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 26, letterSpacing: '-0.04em', color: 'var(--foreground)', lineHeight: 1 }}>yap</span>
+        </div>
+        <h1 className="text-base font-medium mb-6 text-center" style={{ color: 'var(--muted-foreground)' }}>
+          {isSignUp ? 'Create an account' : 'Sign in to continue'}
         </h1>
 
         <GoogleButton />
+        {oauthPending && (
+          <p className="text-xs text-center mt-2" style={{ color: 'var(--muted-foreground)' }}>
+            Completing sign-in…
+          </p>
+        )}
 
         <div className="flex items-center gap-3 my-4">
           <div className="flex-1 h-px" style={{ background: "var(--border)" }} />

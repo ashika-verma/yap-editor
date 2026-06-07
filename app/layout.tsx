@@ -3,8 +3,8 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
-  title: "Yap Editor — Transcript-Based Video Editor",
-  description: "Upload your video, let Gemini find the gold, export a tighter cut.",
+  title: "yap — edit faster",
+  description: "Upload your video, trim the noise, export a tighter cut.",
 };
 
 export default function RootLayout({

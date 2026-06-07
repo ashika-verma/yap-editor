@@ -13,35 +13,54 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  const { filePath, plan } = await req.json();
+  const { filePath, plan, projectId, projectName: suppliedName } = await req.json();
 
   if (!plan?.segments?.length) {
     return NextResponse.json({ error: "No plan to save" }, { status: 400 });
   }
 
   try {
-    const projectName = plan.summary || `Project ${new Date().toLocaleDateString()}`;
+    const projectName = suppliedName || plan.summary || `Project ${new Date().toLocaleDateString()}`;
 
-    // Insert project into Supabase
-    const { data, error } = await supabase
-      .from("projects")
-      .insert([
-        {
-          user_id: user.id,
+    // Embed videoPath into the stored plan data so we can retrieve it on load
+    const storedData = filePath ? { ...plan, videoPath: filePath } : plan;
+
+    // If projectId provided, update existing project; otherwise insert new
+    if (projectId) {
+      const { error } = await supabase
+        .from("projects")
+        .update({
           name: projectName,
-          data: plan,
-        },
-      ])
-      .select()
-      .single();
+          data: storedData,
+        })
+        .eq("id", projectId)
+        .eq("user_id", user.id);
 
-    if (error) throw error;
+      if (error) throw error;
 
-    return NextResponse.json({ 
-      ok: true, 
-      projectId: data.id,
-      project: data 
-    });
+      return NextResponse.json({ ok: true, projectId });
+    } else {
+      // Insert new project
+      const { data, error } = await supabase
+        .from("projects")
+        .insert([
+          {
+            user_id: user.id,
+            name: projectName,
+            data: storedData,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      return NextResponse.json({
+        ok: true,
+        projectId: data.id,
+        project: data
+      });
+    }
   } catch (e) {
     console.error("Failed to save project:", e);
     return NextResponse.json({ error: "Failed to save project" }, { status: 500 });
