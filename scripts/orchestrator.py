@@ -90,7 +90,15 @@ def _run_script(script_name: str, args: list[str]) -> dict:
         timeout=600,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"{script_name} failed: {proc.stderr[-1200:]}")
+        # Scripts write JSON errors to stdout; fall back to stderr for raw tracebacks
+        detail = proc.stderr[-1200:].strip()
+        try:
+            parsed = json.loads(proc.stdout)
+            if parsed.get("error"):
+                detail = parsed["error"]
+        except Exception:
+            pass
+        raise RuntimeError(f"{script_name} failed: {detail}")
     return json.loads(proc.stdout)
 
 

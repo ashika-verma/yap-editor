@@ -111,8 +111,20 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     const msg    = err instanceof Error ? err.message : String(err);
     const stderr = (err as { stderr?: string }).stderr ?? "";
+    const stdout = (err as { stdout?: string }).stdout ?? "";
     console.error("Orchestrator failed:", msg);
     if (stderr) console.error("Orchestrator stderr:", stderr.slice(-2000));
+
+    // Orchestrator writes JSON errors to stdout — surface those first
+    if (stdout) {
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        if (parsed.error) {
+          return NextResponse.json({ error: parsed.error }, { status: 500 });
+        }
+      } catch {}
+    }
+
     const detail = stderr ? stderr.slice(-800) : msg.slice(0, 300);
     return NextResponse.json(
       { error: "Pipeline failed: " + detail },

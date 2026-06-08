@@ -20,11 +20,13 @@ except ImportError:
 
 
 def _extract_wav(video_path: str, wav_path: str) -> None:
-    subprocess.run(
+    result = subprocess.run(
         ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "16000",
          "-sample_fmt", "s16", wav_path],
-        capture_output=True, check=True,
+        capture_output=True,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"No audio stream found in video (ffmpeg exit {result.returncode})")
 
 
 def _detect_speech_regions(audio_path: str,
@@ -46,11 +48,14 @@ def _detect_speech_regions(audio_path: str,
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             wav_for_vad = tmp.name
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-y", "-i", audio_path, "-ac", "1", "-ar", "16000",
              "-sample_fmt", "s16", wav_for_vad],
-            capture_output=True, check=True,
+            capture_output=True,
         )
+        if r.returncode != 0:
+            print("[transcribe] VAD: audio extraction failed, skipping silence detection", file=sys.stderr)
+            return []
         load_path = wav_for_vad
 
     try:

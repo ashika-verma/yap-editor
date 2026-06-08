@@ -41,15 +41,30 @@ SILENCE_DB = -45.0      # dBFS below which a bucket is considered silent
 
 # ── Audio extraction ────────────────────────────────────────────────────────
 
+def _probe_duration(video_path: str) -> float:
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", video_path],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(probe.stdout.strip())
+    except (ValueError, AttributeError):
+        return 60.0
+
+
 def extract_audio(video_path: str) -> tuple[np.ndarray, int]:
+    SR = 16000
     tmp = tempfile.mktemp(suffix=".wav")
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "16000", tmp],
-            check=True,
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", str(SR), tmp],
             capture_output=True,
         )
-        y, sr = librosa.load(tmp, sr=16000, mono=True)
+        if result.returncode != 0:
+            print(f"[analyze] audio extraction failed (exit {result.returncode}) — no audio stream, using silence", file=sys.stderr)
+            dur = _probe_duration(video_path)
+            return np.zeros(int(dur * SR), dtype=np.float32), SR
+        y, sr = librosa.load(tmp, sr=SR, mono=True)
         return y, int(sr)
     finally:
         if os.path.exists(tmp):

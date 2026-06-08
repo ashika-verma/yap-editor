@@ -29,11 +29,22 @@ def main():
         raw_wav = os.path.join(tmp, "raw.wav")
         denoised_wav = os.path.join(tmp, "denoised.wav")
 
-        # Step 1: extract raw audio
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-vn", "-ar", "44100", "-ac", "1", raw_wav],
-            capture_output=True, check=True,
+        # Step 1: check for audio stream, then extract
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", src],
+            capture_output=True, text=True,
         )
+        if not probe.stdout.strip():
+            print("[enhance] no audio stream in source file — skipping enhancement", file=sys.stderr)
+            sys.exit(1)
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-vn", "-ar", "44100", "-ac", "1", raw_wav],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print(f"[enhance] audio extraction failed (exit {result.returncode}): {result.stderr.decode(errors='replace')[-300:]}", file=sys.stderr)
+            sys.exit(1)
 
         # Step 2: resemble-enhance denoise
         print("[enhance] denoising...", file=sys.stderr)
@@ -47,7 +58,7 @@ def main():
 
         # Step 3: EQ + exciter + gate + compressor + loudnorm
         print("[enhance] EQ + dynamics...", file=sys.stderr)
-        subprocess.run(
+        result2 = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", denoised_wav,
                 "-af",
@@ -62,8 +73,11 @@ def main():
                 "loudnorm=I=-18:TP=-1.5:LRA=11",
                 "-ar", "48000", "-ac", "1", dst,
             ],
-            capture_output=True, check=True,
+            capture_output=True,
         )
+        if result2.returncode != 0:
+            print(f"[enhance] EQ pass failed (exit {result2.returncode}): {result2.stderr.decode(errors='replace')[-300:]}", file=sys.stderr)
+            sys.exit(1)
 
     print(f"[enhance] done → {dst}", file=sys.stderr)
 
